@@ -249,7 +249,7 @@ function renderSlotStrip() {
     chip.classList.toggle('focused', i === state.activeSlot && !!pid);
     chip.classList.toggle('empty', !pid);
     chip.querySelector('.slot-label').textContent = p ? p.label : 'empty';
-    chip.onclick = pid ? () => { state.activeSlot = i; renderSidebar(); renderSlotStrip(); paneById(pid)?.term?.focus(); } : null;
+    chip.onclick = pid ? () => { state.activeSlot = i; renderSidebar(); renderSlotStrip(); focusActivePane(paneById(pid)); } : null;
   }
 }
 
@@ -377,8 +377,18 @@ function buildLayout() {
 
   renderSlotStrip();
   const activePane = paneById(state.slots[state.activeSlot]);
-  activePane?.term?.focus();
+  focusActivePane(activePane);
   $('#wc-title-text').textContent = activePane ? `tabterm — ${activePane.label}` : 'tabterm';
+}
+
+// On iOS we never want focus on xterm's helper textarea (broken IME path);
+// redirect to the rail textarea so Hangul composition stays inside it.
+function focusActivePane(pane) {
+  if (document.body.classList.contains('ios-ime')) {
+    document.getElementById('ime-input')?.focus();
+    return;
+  }
+  pane?.term?.focus();
 }
 
 function fitPane(p) {
@@ -634,9 +644,117 @@ window.addEventListener('resize', scheduleFitAll);
 if (window.visualViewport) {
   const vv = window.visualViewport;
   vv.addEventListener('resize', () => {
-    const offset = window.innerHeight - vv.height;
-    $('#kbd-spacer').style.height = offset > 0 ? `${offset}px` : '0';
+    // Desktop pinch/page zoom also fires visualViewport.resize and would
+    // otherwise mutate kbd-spacer/--kbd-offset for non-iOS users. Gate to iOS.
+    if (document.body.classList.contains('ios-ime')) {
+      const offset = window.innerHeight - vv.height;
+      $('#kbd-spacer').style.height = offset > 0 ? `${offset}px` : '0';
+      document.documentElement.style.setProperty('--kbd-offset', offset > 0 ? `${offset}px` : '0px');
+    }
     scheduleFitAll();
+  });
+}
+
+/* ---------- iOS IME input rail ---------- */
+function isIPadLike() {
+  const ua = navigator.userAgent || '';
+  if (/iPad|iPhone|iPod/.test(ua)) return true;
+  // iPadOS 13+ reports MacIntel + maxTouchPoints > 1
+  return navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
+}
+
+// Pane locked in at composition start so a mid-typing slot click does not
+// re-route the buffered Hangul to the newly focused pane.
+let imeTargetPaneId = null;
+
+function getActivePane() {
+  return paneById(state.slots[state.activeSlot]);
+}
+
+function rememberImeTarget() {
+  const p = getActivePane();
+  if (p) imeTargetPaneId = p.id;
+}
+
+function imeSendData(data) {
+  if (!data) return;
+  const p = (imeTargetPaneId && paneById(imeTargetPaneId)) || getActivePane();
+  if (!p) return;
+  sendWs(p, { type: 'input', data });
+}
+
+const IME_KEYMAP = {
+  esc: '\x1b',
+  tab: '\t',
+  'ctrl-c': '\x03',
+  bs: '\x7f',
+  up: '\x1b[A',
+  down: '\x1b[B',
+  right: '\x1b[C',
+  left: '\x1b[D',
+};
+
+function initImeBar() {
+  if (!isIPadLike()) return;
+  if (document.body.classList.contains('ios-ime')) return; // idempotent
+  document.body.classList.add('ios-ime');
+
+  const input = $('#ime-input');
+  const send = $('#ime-send');
+  if (!input || !send) return;
+
+  function flush() {
+    const v = input.value;
+    if (!v) return;
+    imeSendData(v);
+    input.value = '';
+    imeTargetPaneId = null;
+  }
+
+  // Lock the target pane the moment the user starts interacting with the rail.
+  input.addEventListener('focus', rememberImeTarget);
+  input.addEventListener('compositionstart', rememberImeTarget);
+  input.addEventListener('input', () => {
+    if (!imeTargetPaneId) rememberImeTarget();
+  });
+
+  // Enter (no shift) -> flush; Shift+Enter -> textarea newline.
+  // Guard against IME composition: e.isComposing or keyCode 229 means the
+  // Korean keyboard is still committing — let it commit first, then user
+  // can press Enter again.
+  input.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.shiftKey) return;
+    if (e.isComposing || e.keyCode === 229) return;
+    e.preventDefault();
+    flush();
+  });
+  // Safety net: if compositionend never fires (rare iOS keyboards), blur flushes
+  input.addEventListener('blur', () => {
+    if (input.value) flush();
+  });
+
+  send.addEventListener('click', () => {
+    rememberImeTarget();
+    flush();
+  });
+
+  // Auxiliary key buttons
+  $$('.ime-key').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const seq = IME_KEYMAP[btn.dataset.key];
+      if (!seq) return;
+      // Flush any pending textarea content (to the locked target) first,
+      // then send the control sequence to the *current* active pane.
+      if (input.value) flush();
+      const cur = getActivePane();
+      if (cur) sendWs(cur, { type: 'input', data: seq });
+    });
+  });
+
+  // Tapping anywhere in workspace re-focuses the input (xterm helper is blocked)
+  document.getElementById('workspace')?.addEventListener('click', (e) => {
+    if (e.target.closest('.ime-bar')) return;
+    input.focus();
   });
 }
 
@@ -673,6 +791,9 @@ async function init() {
   // watchdog status: initial fetch + 30s polling
   refreshWatchdog();
   setInterval(refreshWatchdog, 30_000);
+
+  // iOS IME rail (no-op on non-iPad)
+  initImeBar();
 }
 
 checkAuth();

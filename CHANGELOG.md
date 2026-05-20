@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.5.1 — 2026-05-20
+
+iPad / iOS Safari Hangul IME jamo-split fix — bottom input rail (ccx peer-reviewed: Claude ∥ Codex).
+
+### Input
+- iPad Safari was sending decomposed jamo (자모) to the PTY because iOS Safari does not fire `compositionstart/compositionend` consistently on xterm.js's hidden helper textarea. The 0.4.1 attempt to guard the helper textarea raced with xterm's own internal IME listeners (rolled back in 0.4.3). xterm 5.x cannot be patched without forking.
+- Solution: a dedicated iOS-only **bottom IME rail** (`#ime-bar` in `public/index.html`). On iPad-like devices we route all keyboard input through this rail instead of xterm's helper textarea. xterm renders the terminal output unchanged.
+- iOS detection: `/iPad|iPhone|iPod/.test(ua) || (platform === 'MacIntel' && maxTouchPoints > 1)`. iPadOS 13+ desktop UA is covered. Desktop browsers (any width) are unaffected.
+- Rail behavior:
+  - Textarea owns the Hangul composition. Enter (no shift) → flush the buffer to PTY (`{type:'input', data:value}`), clear textarea. Shift+Enter → newline inside textarea (multi-line input).
+  - Aux key strip: `Esc`, `Tab`, `^C` (Ctrl+C), `⌫` (Backspace = 0x7f), `↑↓←→` (ANSI CSI sequences). Pressing any aux key flushes pending textarea content first, then sends the control sequence.
+  - `blur` is a safety net: flushes any non-empty value (in case `compositionend` is the only signal and the user taps away).
+- Anti-regression guards:
+  - `body.ios-ime .xterm-helper-textarea { pointer-events: none; opacity: 0; }` — focus cannot return to xterm's broken IME path on iOS, eliminating the double-send / dropped-onData race entirely.
+  - Desktop browsers never get `body.ios-ime`, so xterm's native IME stays in charge there (0.4.3 behavior preserved).
+  - Workspace tap re-focuses the rail textarea (since xterm helper is now non-interactive on iOS).
+- Layout:
+  - Rail is `position: fixed; bottom: calc(env(safe-area-inset-bottom, 0px) + var(--kbd-offset, 0px))`. Existing `visualViewport.resize` handler now sets `--kbd-offset` to the iOS keyboard height so the rail stays visible above the keyboard.
+  - `body.ios-ime .workspace { padding-bottom: 120px }` reserves vertical space so terminal output isn't hidden behind the rail.
+- Service worker cache version bumped to `tabterm-v9-ios-ime` (forces external PCs / iPads to discard `tabterm-v6-ime-fix` / `tabterm-v7-ime-rollback` caches that were causing the "last-character-only" symptom on external Windows desktops).
+
+### Peer review (ccx hybrid: Claude ∥ Codex equal peers, two rounds)
+Round 1 (design):
+- Codex suggested `pointer-events: none` on xterm helper textarea (focus-ownership) — adopted. Eliminates double-input path.
+- Codex suggested `env(safe-area-inset-bottom)` and `visualViewport.resize` for keyboard avoidance — adopted.
+- Codex suggested 80ms `input`-event debounce auto-flush — declined. Auto-flush would send every ASCII keystroke to PTY before the user finishes the command, making line editing unpredictable. Kept the explicit Enter/Send model with `blur` as the safety net.
+- Codex suggested arrow-key escape sequences and Backspace — adopted in aux key strip.
+- Codex suggested `/version` endpoint + client boot version check — declined for scope (sw `activate` cleanup already discards old caches).
+- Both peers agreed: do NOT activate the rail purely on narrow viewport width; the bug is device/input-stack-specific.
+
+Round 2 (implementation review, Codex found 1 RED + 3 YELLOW + 1 BLUE):
+- **RED** — `pointer-events: none` only blocks pointer hits, not programmatic `term.focus()`. `buildLayout()` and slot-chip clicks call `pane.term.focus()`, which routes focus back to xterm's helper textarea and defeats the rail. Fixed by introducing `focusActivePane(pane)`: on iOS it focuses `#ime-input` instead of `pane.term`. Both call sites in `public/app.js` updated.
+- **YELLOW 1** — Enter keydown handler did not guard against IME composition state. On Korean keyboards, Enter is used to commit composition; flushing during composition could send incomplete jamo. Added `if (e.isComposing || e.keyCode === 229) return;` guard.
+- **YELLOW 2** — Buffered text could be routed to a different pane if the user clicked another slot mid-composition (`mousedown` changes `state.activeSlot` before `blur`/`click` flush runs). Added `imeTargetPaneId` lock captured on `focus`/`compositionstart`/`input`. Flush sends to the locked target, then clears the lock. Aux keys still send their control sequence to the *current* active pane (so Ctrl+C after switching slots reaches the new slot, matching user intent).
+- **YELLOW 3** — `visualViewport.resize` mutated `#kbd-spacer` and `--kbd-offset` on desktop too (e.g. pinch/page zoom). Gated those mutations behind `body.ios-ime`. `scheduleFitAll()` still runs everywhere.
+- **BLUE** — `initImeBar` was not idempotent. Added a `body.ios-ime` early-return guard so a hypothetical second `init()` call cannot double-bind listeners.
+- Codex verified: Backspace `\x7f` (correct for Linux PTY erase), Esc/Tab/Ctrl-C/arrow CSI sequences correct, no XSS introduced, service-worker upgrade path adequate.
+
+### Notes
+- External Windows desktops that reported the "Korean shows only last character" symptom were running cached 0.4.2 code (sw `tabterm-v6-ime-fix`). The v9 service-worker version forces the cache eviction. Hard reload (or Application → Service Workers → Unregister) once on each external machine to pick up the fix.
+
 ## 0.5.0 — 2026-05-20
 
 Watchdog + zombie cleanup + bulk boot absorbed into tabterm. `start-ccx-full-all.bat` and siblings deprecated — single `npm start` now drives the full ccx pipeline (zombie cleanup, HydraTeams preflight, worker fleet, watchdog lifecycle).

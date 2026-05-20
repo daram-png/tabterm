@@ -1,4 +1,4 @@
-const VERSION = 'tabterm-v8-watchdog';
+const VERSION = 'tabterm-v9-ios-ime';
 const SHELL = [
   '/',
   '/index.html',

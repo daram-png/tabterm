@@ -121,6 +121,24 @@
     </main>
   </div>
 
+  <!-- iPad / iOS hangul IME input rail (hidden by default; revealed by body.ios-ime) -->
+  <div id="ime-bar" class="ime-bar" role="region" aria-label="iOS input rail">
+    <div class="ime-keys">
+      <button type="button" class="ime-key" data-key="esc" title="Esc">Esc</button>
+      <button type="button" class="ime-key" data-key="tab" title="Tab">Tab</button>
+      <button type="button" class="ime-key" data-key="ctrl-c" title="Ctrl+C">^C</button>
+      <button type="button" class="ime-key" data-key="bs" title="Backspace">⌫</button>
+      <button type="button" class="ime-key" data-key="up" title="↑">↑</button>
+      <button type="button" class="ime-key" data-key="down" title="↓">↓</button>
+      <button type="button" class="ime-key" data-key="left" title="←">←</button>
+      <button type="button" class="ime-key" data-key="right" title="→">→</button>
+    </div>
+    <div class="ime-row">
+      <textarea id="ime-input" rows="1" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="한글 입력 후 Enter (Shift+Enter=줄바꿈)"></textarea>
+      <button type="button" id="ime-send" class="ime-send" title="Send (Enter)">↵</button>
+    </div>
+  </div>
+
   <div id="kbd-spacer" class="kbd-spacer"></div>
 </div>
 
