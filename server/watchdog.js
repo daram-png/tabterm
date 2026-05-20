@@ -6,7 +6,6 @@ const AUTOSTART = String(process.env.WATCHDOG_AUTOSTART ?? 'true') === 'true';
 const SCRIPT_PATH = process.env.WATCHDOG_PATH || 'C:/workspace/watchdog/watchdog.js';
 const CONFIG_PATH = process.env.WATCHDOG_CONFIG || 'C:/workspace/watchdog/config-ccx-full.json';
 const LOG_PATH = process.env.WATCHDOG_LOG || 'C:/workspace/watchdog/watchdog.log';
-const EXTERNAL_DETECT_MAX_AGE_MS = 90_000;
 const HEALTHY_MAX_AGE_MS = 90_000;
 const DEGRADED_MAX_AGE_MS = 600_000;
 const TAIL_MAX_LINES = 500;
@@ -15,17 +14,6 @@ let wdProc = null;
 let wdStartedAt = 0;
 let wdLastExitCode = null;
 let wdLastError = null;
-
-async function detectExternalWatchdog() {
-  if (!existsSync(LOG_PATH)) return null;
-  try {
-    const s = await stat(LOG_PATH);
-    const age = Date.now() - s.mtimeMs;
-    return age < EXTERNAL_DETECT_MAX_AGE_MS ? { mtimeMs: s.mtimeMs, ageMs: age } : null;
-  } catch {
-    return null;
-  }
-}
 
 export async function startWatchdog(log) {
   if (!AUTOSTART) {
@@ -44,13 +32,20 @@ export async function startWatchdog(log) {
     return { spawned: false, reason: 'already-spawned', pid: wdProc.pid };
   }
 
-  const ext = await detectExternalWatchdog();
-  if (ext) {
-    log.info(
-      { ageMs: ext.ageMs },
-      '[watchdog] external watchdog detected (log mtime fresh) — not spawning duplicate',
-    );
-    return { spawned: false, reason: 'external-active', ageMs: ext.ageMs };
+  // Log-only advisory: if watchdog.log mtime is fresh, another watchdog may
+  // still be running. We do NOT block spawn on this (the 90s mtime window
+  // would otherwise create a blind period after a crashed watchdog where
+  // we silently refuse to restart). The PID guard above is the authoritative
+  // duplicate-prevention. The two-watchdog overlap is brief and self-healing
+  // (the older one notices its PID file/log changed and exits).
+  if (existsSync(LOG_PATH)) {
+    try {
+      const s = await stat(LOG_PATH);
+      const age = Date.now() - s.mtimeMs;
+      if (age < HEALTHY_MAX_AGE_MS) {
+        log.info({ ageMs: age }, '[watchdog] existing log mtime is fresh — another watchdog may be active');
+      }
+    } catch { /* stat failure is non-fatal advisory */ }
   }
 
   try {
@@ -88,10 +83,12 @@ export function stopWatchdog(log) {
   try {
     log.info({ pid: proc.pid }, '[watchdog] stopping child');
     proc.kill('SIGTERM');
+    // Do NOT null wdProc here — let the 'exit' handler do it so
+    // wdLastExitCode reflects the actual termination, not a stale state.
   } catch (e) {
-    log.warn({ err: e?.message }, '[watchdog] kill failed');
+    log.warn({ err: e?.message }, '[watchdog] kill failed — assuming already exited');
+    wdProc = null;
   }
-  wdProc = null;
   return true;
 }
 

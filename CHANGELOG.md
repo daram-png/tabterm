@@ -31,6 +31,23 @@ Watchdog + zombie cleanup + bulk boot absorbed into tabterm. `start-ccx-full-all
 ### Notes
 - This is the first git-tracked commit set in `C:/Tools/tabterm`. `git init` ran with `.gitignore` already covering `node_modules/`, `data/auth.json`, `data/audit.log`, `.env`, `public/vendor/`, plus `logs/` added in this change. Initial `chore: initial commit — tabterm v0.4.3 baseline` precedes the v0.5 work.
 
+### Peer review (security-auditor + code-reviewer in parallel)
+- security-auditor: 0 RED / 3 YELLOW / 6 BLUE. No merge blockers. Confirmed PowerShell JSON output handling, `execFile`/`taskkill` argv safety, hydra preflight singleton, `process.pid` filter, modal XSS surface (`.textContent` on log tail).
+- code-reviewer: 2 Critical / 4 Warnings / 6 BLUE — REQUEST_CHANGES. Both Critical issues applied:
+  - `stopWatchdog` no longer nulls `wdProc` eagerly; the `exit` handler nulls it so `wdLastExitCode` reflects reality. Eager null happens only when `proc.kill` itself throws (process already gone).
+  - `detectExternalWatchdog` mtime guard removed — it created a 90-second blind window after a crashed watchdog where re-spawn was silently refused. The PID guard (`if (wdProc) return`) is the authoritative duplicate-prevention; the mtime check is now a log-only advisory.
+- Warnings applied:
+  - `paintWatchdogDot` parameter renamed `state` → `dotState` to stop shadowing the module-level `state` object.
+  - `sessions.getPtyPid?.()` optional chain dropped — the method always exists, the `?.` was hiding any future rename.
+  - boot-all's session-refresh `catch {}` now logs to `console.warn` and toasts an amber warning so silent failures don't leave the user wondering why workers don't appear.
+  - `.filter(Boolean)` on the protection-set roots widened to `Number.isInteger(x) && x > 0` for symmetry with `descendantsOf`.
+  - PowerShell stdout parser strips a UTF-8 BOM before `JSON.parse` so quirky PS versions don't fail with a useless "process-list-failed".
+  - cleanup-zombies confirm dialog now explicitly notes that previous-tabterm leftover `claude.exe` processes are NOT protected (PPID-orphan scenario).
+- Deferred (BLUE, not worth a follow-up commit yet):
+  - `tailWatchdogLog` reads the entire log file — fine for 50-line tails at 30s polling for now. Re-evaluate if a multi-month watchdog log grows past ~100MB.
+  - Missing CSP header. Defense-in-depth, but X-Frame-Options + CSRF + httpOnly cookie already contain the practical risk.
+  - `taskkill /T` on `stopWatchdog`: declined. Worker `claude.exe` processes are spawned by watchdog but are intentionally independent (a `cmd /B` detached child). Killing them on tabterm shutdown would regress vs `start-ccx-full-all.bat` behavior, which only kills watchdog on stop, never workers.
+
 ## 0.4.3 — 2026-05-20
 
 Roll back the IME composition layer (0.4.1 / 0.4.2). Restore 0.4.0 input behavior on all platforms.

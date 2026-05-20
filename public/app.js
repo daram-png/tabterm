@@ -526,14 +526,22 @@ $('#btn-boot-all').addEventListener('click', async () => {
         if (!paneById(s.id)) addPaneFromServer(s);
       }
       renderSidebar();
-    } catch {}
+    } catch (e) {
+      console.warn('session refresh after boot-all failed:', e);
+      toast('boot-all succeeded but session list refresh failed — reload to see new workers', 'amber', 6000);
+    }
   } catch (e) {
     toast(`boot-all failed: ${e.message || e}`, 'err');
   }
 });
 
 $('#btn-cleanup-zombies').addEventListener('click', async () => {
-  if (!confirm('Kill all stale bun/claude/node processes outside tabterm/watchdog/active PTYs?\n\n주의: 이 tabterm 인스턴스와 와치독, 살아있는 세션의 PTY 는 보호되지만, 다른 외부 node 프로세스가 있다면 같이 죽을 수 있습니다.')) return;
+  if (!confirm(
+    'Kill all stale bun/claude/node processes outside tabterm/watchdog/active PTYs?\n\n' +
+    '보호: 현재 tabterm 인스턴스 + 자식 와치독 + 살아있는 세션 PTY 트리 전체.\n' +
+    '주의 1: 이전 tabterm 세션이 남긴 claude.exe (이번 인스턴스에 attach 안 된 것) 는 보호 대상 아님 — 같이 죽음.\n' +
+    '주의 2: 외부 node/bun 프로세스 (e.g. dev server, 다른 도구) 도 트리 밖이면 죽음.'
+  )) return;
   toast('cleaning zombies...', 'amber', 2000);
   try {
     const r = await api('/api/system/cleanup-zombies', { method: 'POST', body: JSON.stringify({}) });
@@ -552,10 +560,12 @@ $('#wd-modal').addEventListener('click', (e) => {
   if (e.target.id === 'wd-modal') $('#wd-modal').classList.add('hidden');
 });
 
-function paintWatchdogDot(state) {
+function paintWatchdogDot(dotState) {
+  // dotState shadowed the module-level `state` object before; renamed to
+  // prevent future edits from accidentally reading the parameter.
   const dot = $('#wd-dot');
   if (!dot) return;
-  dot.dataset.state = state || 'unknown';
+  dot.dataset.state = dotState || 'unknown';
 }
 
 function fmtAge(ms) {

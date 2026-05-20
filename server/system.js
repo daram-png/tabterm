@@ -30,7 +30,11 @@ async function listProcessSnapshot() {
       ],
       { maxBuffer: PROCESS_LIST_BUFFER, windowsHide: true },
     );
-    const parsed = JSON.parse(stdout || '[]');
+    // Strip BOM + whitespace — some PowerShell versions prepend a UTF-8 BOM
+    // even with -NoProfile. JSON.parse throws on BOM, but the outer try
+    // would swallow it as "process-list-failed" without explanation.
+    const cleaned = (stdout || '[]').replace(/^﻿/, '').trim();
+    const parsed = JSON.parse(cleaned);
     const arr = Array.isArray(parsed) ? parsed : [parsed];
     const map = new Map();
     for (const p of arr) {
@@ -84,11 +88,13 @@ export function registerSystemRoutes(app, ctx) {
 
     const sessionPids = [];
     for (const s of sessions.list()) {
-      const pid = sessions.getPtyPid?.(s.id);
+      const pid = sessions.getPtyPid(s.id);
       if (pid) sessionPids.push(pid);
     }
     const wdPid = getWatchdogPid();
-    const roots = [process.pid, wdPid, ...sessionPids].filter(Boolean);
+    const roots = [process.pid, wdPid, ...sessionPids].filter(
+      (x) => Number.isInteger(x) && x > 0,
+    );
     const protectedSet = descendantsOf(roots, processMap);
 
     const targets = [];
