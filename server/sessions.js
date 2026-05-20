@@ -168,6 +168,15 @@ class SessionStore {
     }
     this.#map.clear();
   }
+
+  // Used by /api/system/cleanup-zombies to build the protection set: the
+  // top PID of each live PTY (cmd.exe) — node-pty exposes it as pty.pid.
+  // Descendants (claude.exe, plugin node.exe) are added by walking ppid.
+  getPtyPid(id) {
+    const s = this.#map.get(id);
+    if (!s || !s.alive) return null;
+    try { return s.pty?.pid ?? null; } catch { return null; }
+  }
 }
 
 export const sessions = new SessionStore();

@@ -511,6 +511,104 @@ $('#btn-hydra-recheck').addEventListener('click', async () => {
   } catch (e) { toast(`hydra check failed: ${e.message || e}`, 'err'); }
 });
 
+/* ---------- system actions (boot-all / cleanup / watchdog status) ---------- */
+$('#btn-boot-all').addEventListener('click', async () => {
+  if (!confirm(`Boot all ${state.workersCount} workers? Already-running slots are skipped.`)) return;
+  toast(`booting ${state.workersCount} workers...`, 'amber', 0);
+  try {
+    const r = await api('/api/system/boot-all', { method: 'POST', body: JSON.stringify({}) });
+    const msg = `boot-all: spawned ${r.spawned.length}, skipped ${r.skipped.length}, failed ${r.failed.length}`;
+    toast(msg, r.failed.length ? 'err' : 'ok', 6000);
+    // Refresh session list so new workers appear in sidebar/slots
+    try {
+      const cur = await api('/api/sessions');
+      for (const s of (cur.sessions || [])) {
+        if (!paneById(s.id)) addPaneFromServer(s);
+      }
+      renderSidebar();
+    } catch {}
+  } catch (e) {
+    toast(`boot-all failed: ${e.message || e}`, 'err');
+  }
+});
+
+$('#btn-cleanup-zombies').addEventListener('click', async () => {
+  if (!confirm('Kill all stale bun/claude/node processes outside tabterm/watchdog/active PTYs?\n\n주의: 이 tabterm 인스턴스와 와치독, 살아있는 세션의 PTY 는 보호되지만, 다른 외부 node 프로세스가 있다면 같이 죽을 수 있습니다.')) return;
+  toast('cleaning zombies...', 'amber', 2000);
+  try {
+    const r = await api('/api/system/cleanup-zombies', { method: 'POST', body: JSON.stringify({}) });
+    const msg = `killed ${r.killed.length}, failed ${r.failed.length}, protected ${r.protectedPids.length}`;
+    toast(msg, r.failed.length ? 'err' : 'ok', 6000);
+  } catch (e) {
+    toast(`cleanup failed: ${e.message || e}`, 'err');
+  }
+});
+
+$('#btn-wd-status').addEventListener('click', async () => {
+  await refreshWatchdog({ openModal: true });
+});
+$('#btn-wd-modal-close').addEventListener('click', () => $('#wd-modal').classList.add('hidden'));
+$('#wd-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'wd-modal') $('#wd-modal').classList.add('hidden');
+});
+
+function paintWatchdogDot(state) {
+  const dot = $('#wd-dot');
+  if (!dot) return;
+  dot.dataset.state = state || 'unknown';
+}
+
+function fmtAge(ms) {
+  if (ms == null || !isFinite(ms)) return '–';
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
+  return `${(ms / 3_600_000).toFixed(1)}h`;
+}
+
+async function refreshWatchdog({ openModal = false } = {}) {
+  try {
+    const r = await api('/api/system/watchdog-status');
+    const wd = r.watchdog || {};
+    const health = wd.health || {};
+    paintWatchdogDot(health.status);
+
+    if (openModal) {
+      const hydraLive = r.hydra?.live;
+      const summary = $('#wd-summary');
+      const rows = [
+        ['status', health.status || 'unknown', stateClass(health.status)],
+        ['log age', fmtAge(health.ageMs), health.ageMs != null && health.ageMs > 90_000 ? 'warn' : 'ok'],
+        ['pid (child)', wd.pid != null ? String(wd.pid) : 'not running', wd.pid ? 'ok' : 'warn'],
+        ['autostart', String(wd.autostart), 'v'],
+        ['script', wd.scriptPath || '', 'v'],
+        ['config', wd.configPath || '', 'v'],
+        ['log', wd.logPath || '', 'v'],
+        ['hydra', hydraLive ? (hydraLive.ok ? 'ok' : 'down') : 'unknown', hydraLive?.ok ? 'ok' : 'err'],
+      ];
+      summary.innerHTML = rows.map(([k, v, klass]) =>
+        `<div class="k">${escapeHtml(k)}</div><div class="v ${klass === 'ok' ? 'ok' : klass === 'warn' ? 'warn' : klass === 'err' ? 'err' : ''}">${escapeHtml(String(v))}</div>`
+      ).join('');
+      $('#wd-log').textContent = (r.logTail || []).join('\n') || '(empty)';
+      $('#wd-modal').classList.remove('hidden');
+    }
+  } catch (e) {
+    paintWatchdogDot('unknown');
+    if (openModal) {
+      $('#wd-summary').innerHTML = `<div class="k">error</div><div class="v err">${escapeHtml(String(e.message || e))}</div>`;
+      $('#wd-log').textContent = '';
+      $('#wd-modal').classList.remove('hidden');
+    }
+  }
+}
+
+function stateClass(s) {
+  if (s === 'healthy') return 'ok';
+  if (s === 'degraded') return 'warn';
+  if (s === 'dead') return 'err';
+  return '';
+}
+
 /* ---------- resize ---------- */
 let resizeTimer;
 function scheduleFitAll() {
@@ -561,6 +659,10 @@ async function init() {
   buildLayout();
   renderSidebar();
   renderSlotStrip();
+
+  // watchdog status: initial fetch + 30s polling
+  refreshWatchdog();
+  setInterval(refreshWatchdog, 30_000);
 }
 
 checkAuth();

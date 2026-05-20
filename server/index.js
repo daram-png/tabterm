@@ -16,6 +16,8 @@ import { registerWs } from './ws.js';
 import { audit } from './audit.js';
 import { ensureHydraReady, hydraStatus } from './hydra.js';
 import { loadWorkerEnv, buildClaudeInvocation } from './config.js';
+import { startWatchdog, stopWatchdog } from './watchdog.js';
+import { registerSystemRoutes } from './system.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const HOST = process.env.HOST || '127.0.0.1';
@@ -161,52 +163,81 @@ app.get('/api/sessions', async (req, reply) => {
   return { sessions: sessions.list() };
 });
 
+// Extracted so /api/system/boot-all can spawn workers without re-implementing
+// hydra preflight, env loading, audit logging, or args building. Returns
+// { ok, session, envSource, envWarnings } on success or { ok: false, error: { code, body } }.
+async function spawnWorkerSession({ workerIndex, label, cols, rows, ip }) {
+  if (!Number.isInteger(workerIndex) || workerIndex < 0 || workerIndex >= WORKERS_COUNT) {
+    return { ok: false, error: { code: 400, body: { error: 'workerIndex out of range' } } };
+  }
+  const cwd = resolve(WORKERS_ROOT, `${WORKER_PREFIX}${workerIndex}`);
+  if (!existsSync(cwd)) {
+    return { ok: false, error: { code: 400, body: { error: 'cwd missing', cwd } } };
+  }
+  if (HYDRA_ENABLED) {
+    const r = await ensureHydraReady();
+    if (!r.ready) {
+      audit.log({ event: 'session.create.blocked', reason: 'hydra-not-ready', ip });
+      return { ok: false, error: { code: 503, body: { error: 'hydra-not-ready', log: r.log } } };
+    }
+  }
+  const inv = buildClaudeInvocation();
+  const wEnv = await loadWorkerEnv(cwd);
+  const extraEnv = { ANTHROPIC_BASE_URL, ...wEnv.env };
+  const sessionLabel = label || `${WORKER_PREFIX}${workerIndex}`;
+  try {
+    const s = sessions.create({
+      label: sessionLabel,
+      cwd,
+      command: inv.cmd,
+      claudeArgs: inv.argsStr,
+      cols: Math.min(Math.max(Number(cols) || 120, 20), 400),
+      rows: Math.min(Math.max(Number(rows) || 32, 8), 200),
+      extraEnv,
+      meta: { kind: 'worker', workerIndex },
+      onExit: ({ id, exitCode }) => audit.log({ event: 'session.exit', id, exitCode, kind: 'worker' }),
+    });
+    audit.log({
+      event: 'session.create',
+      id: s.id,
+      cwd,
+      kind: 'worker',
+      envSource: wEnv.source,
+      envWarnings: wEnv.warnings,
+      ip,
+    });
+    return { ok: true, session: s.summary(), envSource: wEnv.source, envWarnings: wEnv.warnings };
+  } catch (e) {
+    app.log.error(e);
+    return { ok: false, error: { code: 500, body: { error: 'spawn-failed', message: String(e?.message || e) } } };
+  }
+}
+
 app.post('/api/sessions', async (req, reply) => {
   if (!requireAuth(req, reply)) return;
   if (!requireCsrf(req, reply)) return;
   const { label, kind, workerIndex, cols, rows } = req.body || {};
-  const inv = buildClaudeInvocation();
   const sessionKind = kind === 'session' ? 'session' : 'worker';
 
-  let cwd, sessionLabel = label, extraEnv = {}, claudeArgs = '';
-  let envSource = 'none', envWarnings = [];
-
   if (sessionKind === 'worker') {
-    if (!Number.isInteger(workerIndex) || workerIndex < 0 || workerIndex >= WORKERS_COUNT) {
-      return reply.code(400).send({ error: 'workerIndex out of range' });
-    }
-    cwd = resolve(WORKERS_ROOT, `${WORKER_PREFIX}${workerIndex}`);
-    if (!existsSync(cwd)) return reply.code(400).send({ error: 'cwd missing', cwd });
-
-    if (HYDRA_ENABLED) {
-      const r = await ensureHydraReady();
-      if (!r.ready) {
-        audit.log({ event: 'session.create.blocked', reason: 'hydra-not-ready', ip: req.ip });
-        return reply.code(503).send({ error: 'hydra-not-ready', log: r.log });
-      }
-    }
-
-    const wEnv = await loadWorkerEnv(cwd);
-    envSource = wEnv.source;
-    envWarnings = wEnv.warnings;
-    extraEnv = { ANTHROPIC_BASE_URL, ...wEnv.env };
-    claudeArgs = inv.argsStr;
-    sessionLabel = sessionLabel || `${WORKER_PREFIX}${workerIndex}`;
-  } else {
-    // general session — no ccx env, fresh dir under WORKERS_ROOT
-    const ts = new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14);
-    const rand = randomBytes(2).toString('hex');
-    const name = `${NEW_SESSION_PREFIX}${ts}-${rand}`;
-    cwd = resolve(WORKERS_ROOT, name);
-    try {
-      await mkdir(cwd, { recursive: true });
-    } catch (e) {
-      return reply.code(500).send({ error: 'mkdir-failed', message: String(e?.message || e) });
-    }
-    sessionLabel = sessionLabel || name;
-    claudeArgs = process.env.SESSION_CLAUDE_ARGS || '';
+    const r = await spawnWorkerSession({ workerIndex, label, cols, rows, ip: req.ip });
+    if (!r.ok) return reply.code(r.error.code).send(r.error.body);
+    return { session: r.session, envSource: r.envSource, envWarnings: r.envWarnings };
   }
 
+  // general session — no ccx env, fresh dir under WORKERS_ROOT
+  const inv = buildClaudeInvocation();
+  const ts = new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14);
+  const rand = randomBytes(2).toString('hex');
+  const name = `${NEW_SESSION_PREFIX}${ts}-${rand}`;
+  const cwd = resolve(WORKERS_ROOT, name);
+  try {
+    await mkdir(cwd, { recursive: true });
+  } catch (e) {
+    return reply.code(500).send({ error: 'mkdir-failed', message: String(e?.message || e) });
+  }
+  const sessionLabel = label || name;
+  const claudeArgs = process.env.SESSION_CLAUDE_ARGS || '';
   try {
     const s = sessions.create({
       label: sessionLabel,
@@ -215,27 +246,32 @@ app.post('/api/sessions', async (req, reply) => {
       claudeArgs,
       cols: Math.min(Math.max(Number(cols) || 120, 20), 400),
       rows: Math.min(Math.max(Number(rows) || 32, 8), 200),
-      extraEnv,
-      meta: {
-        kind: sessionKind,
-        workerIndex: sessionKind === 'worker' ? workerIndex : null,
-      },
-      onExit: ({ id, exitCode }) => audit.log({ event: 'session.exit', id, exitCode, kind: sessionKind }),
+      extraEnv: {},
+      meta: { kind: 'session', workerIndex: null },
+      onExit: ({ id, exitCode }) => audit.log({ event: 'session.exit', id, exitCode, kind: 'session' }),
     });
     audit.log({
       event: 'session.create',
       id: s.id,
       cwd,
-      kind: sessionKind,
-      envSource,
-      envWarnings,
+      kind: 'session',
+      envSource: 'none',
+      envWarnings: [],
       ip: req.ip,
     });
-    return { session: s.summary(), envSource, envWarnings };
+    return { session: s.summary(), envSource: 'none', envWarnings: [] };
   } catch (e) {
     app.log.error(e);
     return reply.code(500).send({ error: 'spawn-failed', message: String(e?.message || e) });
   }
+});
+
+registerSystemRoutes(app, {
+  sessions,
+  spawnWorkerSession,
+  workersCount: WORKERS_COUNT,
+  requireAuth,
+  requireCsrf,
 });
 
 app.delete('/api/sessions/:id', async (req, reply) => {
@@ -265,6 +301,7 @@ async function shutdown(sig) {
   shuttingDown.v = true;
   app.log.info(`[shutdown] signal=${sig}, killing ${sessions.list().length} sessions`);
   sessions.killAll();
+  stopWatchdog(app.log);
   audit.log({ event: 'server.shutdown', signal: sig });
   try { await app.close(); } catch {}
   process.exit(0);
@@ -289,6 +326,9 @@ if (HYDRA_ENABLED) {
   }
   audit.log({ event: 'hydra.preflight', ready: r.ready });
 }
+
+const wdResult = await startWatchdog(app.log);
+audit.log({ event: 'watchdog.start', ...wdResult });
 
 await app.listen({ host: HOST, port: PORT });
 app.log.info(`tabterm listening on http://${HOST}:${PORT}`);

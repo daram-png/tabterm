@@ -69,6 +69,16 @@
           <div class="slot-chip" id="slot-chip-1" data-slot="1"><span class="slot-num">R</span><span class="slot-label">empty</span></div>
         </div>
         <div class="actions">
+          <div class="btn sys" id="btn-boot-all" title="Boot all workers (0..N)">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.5 V8 M5 4.5 L8 1.5 L11 4.5"/><path d="M2.5 8 V12.5 H13.5 V8"/></svg>
+          </div>
+          <div class="btn sys" id="btn-cleanup-zombies" title="Cleanup zombie processes (bun/claude/node)">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5 H12 L11 13 a1 1 0 0 1-1 1 H6 a1 1 0 0 1-1-1 Z"/><path d="M3 5.5 H13 M6.5 4 V3 a1 1 0 0 1 1-1 H8.5 a1 1 0 0 1 1 1 V4"/></svg>
+          </div>
+          <div class="btn sys" id="btn-wd-status" title="Watchdog status">
+            <span class="wd-dot" id="wd-dot" data-state="unknown"></span>
+          </div>
+          <span class="actions-divider"></span>
           <div class="btn" id="btn-soft-stop" title="Send Ctrl+C">
             <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" stroke="none"><rect x="5" y="3.5" width="2" height="9"/><rect x="9" y="3.5" width="2" height="9"/></svg>
           </div>
@@ -83,6 +93,22 @@
 
       <!-- workspace (max 2 split panes) -->
       <div class="workspace" id="workspace"></div>
+
+      <!-- watchdog status modal (toggled by btn-wd-status) -->
+      <div id="wd-modal" class="wd-modal hidden" role="dialog" aria-modal="true" aria-labelledby="wd-modal-title">
+        <div class="wd-modal-card">
+          <div class="wd-modal-head">
+            <span id="wd-modal-title">Watchdog status</span>
+            <span class="wd-modal-close" id="btn-wd-modal-close" title="Close">
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 3.5 L12.5 12.5 M12.5 3.5 L3.5 12.5"/></svg>
+            </span>
+          </div>
+          <div class="wd-modal-body">
+            <div class="wd-summary" id="wd-summary"></div>
+            <div class="wd-log" id="wd-log"></div>
+          </div>
+        </div>
+      </div>
 
       <!-- toast -->
       <div id="toast" class="toast hidden">

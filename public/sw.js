@@ -1,4 +1,4 @@
-const VERSION = 'tabterm-v7-ime-rollback';
+const VERSION = 'tabterm-v8-watchdog';
 const SHELL = [
   '/',
   '/index.html',

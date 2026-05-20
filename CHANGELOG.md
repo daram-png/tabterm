@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.5.0 — 2026-05-20
+
+Watchdog + zombie cleanup + bulk boot absorbed into tabterm. `start-ccx-full-all.bat` and siblings deprecated — single `npm start` now drives the full ccx pipeline (zombie cleanup, HydraTeams preflight, worker fleet, watchdog lifecycle).
+
+### Server
+- `server/watchdog.js` — child-process lifecycle for `C:/workspace/watchdog/watchdog.js`. `startWatchdog()` spawns the script with `--config <WATCHDOG_CONFIG>` as `detached: false`, so the watchdog dies when tabterm dies. `stdio: 'ignore'` because watchdog writes its own `watchdog.log`. Skips spawn when an external watchdog is already running (detected by `watchdog.log` mtime within 90s) so a manually-started watchdog isn't duplicated. Skips entirely when `WATCHDOG_AUTOSTART=false`, when the script path is missing, or when the config is missing.
+- `server/system.js` — three new endpoints, all auth+CSRF gated:
+  - `POST /api/system/cleanup-zombies` enumerates running processes via `Get-CimInstance Win32_Process` (wmic is deprecated on Win11 22H2). Walks parent→child to build a protection set rooted at tabterm's own PID, the spawned watchdog PID, and every live PTY's top PID (exposed by new `sessions.getPtyPid(id)`). Kills only `bun.exe`/`claude.exe`/`node.exe` outside that set with `taskkill /F /PID`. Returns `{killed, failed, protectedPids, processCount}` and audit-logs the operation. Aborts if process enumeration returns empty (refuses to kill blindly when we can't see the tree).
+  - `POST /api/system/boot-all` iterates `worker-0..N`, skips slots that already have a live worker session, calls the shared `spawnWorkerSession` helper. Default 3000ms gap (matches the old bat, configurable via `intervalMs` body param 0..30000).
+  - `GET /api/system/watchdog-status` returns watchdog state + health (`healthy` < 90s log age, `degraded` 90s..600s, `dead` > 600s or log missing), a live HydraTeams probe (`/health` GET with no auto-launcher), and the last 50 watchdog.log lines.
+- `server/index.js` — `spawnWorkerSession({workerIndex, label, cols, rows, ip})` extracted from the `/api/sessions` handler so boot-all and the public route share the same hydra preflight + env loading + audit logging. `/api/sessions` general-session branch kept inline. `startWatchdog` called after hydra preflight; `stopWatchdog` added to the SIGINT/SIGTERM/SIGBREAK shutdown path so Ctrl+C tears down the whole tree.
+- `server/sessions.js` — `getPtyPid(id)` exposes the top PID of each live PTY so cleanup-zombies can include it in the protection set.
+- `server/hydra.js` — `hydraLiveHealth()` exported. Non-spawning `/health` probe used by watchdog-status (we don't want the status query to trigger `hydra-launcher.sh`).
+
+### Frontend
+- Three new toolbar buttons in the actions group (boot-all / cleanup-zombies / watchdog-status), separated from per-session tools (soft-stop / kill / logout) by a 1px divider. Boot and cleanup ask for confirmation; cleanup spells out the protection rule in the dialog so a stray click doesn't blow away unrelated `node.exe` processes.
+- Watchdog status dot lives inside the status button: `healthy` green, `degraded` amber, `dead` red, `unknown` gray. Painted on initial load and refreshed every 30s via `/api/system/watchdog-status` (also the same call the modal uses).
+- Status modal renders summary table + last 50 log lines with monospace wrapping. Click outside or the X to close.
+- `public/sw.js` VERSION → `tabterm-v8-watchdog`.
+
+### Config
+- `.env.example`: `WATCHDOG_AUTOSTART=true`, `WATCHDOG_PATH=C:/workspace/watchdog/watchdog.js`, `WATCHDOG_CONFIG=C:/workspace/watchdog/config-ccx-full.json`, `WATCHDOG_LOG=C:/workspace/watchdog/watchdog.log`.
+- `package.json` version bumped 0.1.0 → 0.5.0 (had drifted behind the CHANGELOG).
+
+### bat deprecation
+- `C:/workspace/watchdog/start-ccx-full-all.bat`, `start-ccx-all.bat`, `start-all.bat` carry a `REM DEPRECATED 2026-05-20` block that points to `npm start` in `C:/Tools/tabterm` and explains which toolbar action covers each old step. Scheduled for removal in tabterm v0.6.
+- `start-watchdog-ccx-full.bat` / `start-watchdog-ccx.bat` / `start-watchdog.bat` kept for debugging — they only spawn watchdog without touching workers, which is still useful when tabterm itself is being modified.
+
+### Notes
+- This is the first git-tracked commit set in `C:/Tools/tabterm`. `git init` ran with `.gitignore` already covering `node_modules/`, `data/auth.json`, `data/audit.log`, `.env`, `public/vendor/`, plus `logs/` added in this change. Initial `chore: initial commit — tabterm v0.4.3 baseline` precedes the v0.5 work.
+
 ## 0.4.3 — 2026-05-20
 
 Roll back the IME composition layer (0.4.1 / 0.4.2). Restore 0.4.0 input behavior on all platforms.

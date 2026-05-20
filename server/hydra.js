@@ -69,3 +69,12 @@ export async function ensureHydraReady({ force = false } = {}) {
 export function hydraStatus() {
   return { ...lastStatus };
 }
+
+export async function hydraLiveHealth() {
+  // Non-spawning probe: just checks /health and returns ok/down without
+  // triggering hydra-launcher. Updates lastStatus so subsequent
+  // hydraStatus() reads agree with what we just observed.
+  const ok = await healthy();
+  lastStatus = { ...lastStatus, ready: ok, lastCheck: Date.now() };
+  return { ok, healthUrl: HEALTH_URL, checkedAt: lastStatus.lastCheck };
+}
