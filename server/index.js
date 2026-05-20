@@ -1,4 +1,5 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config({ override: true });
 import Fastify from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.5.2 — 2026-05-20
+
+dotenv `override: true` — fixes all-workers Telegram plugin unresponsive (ccx peer-reviewed: Claude ∥ Codex final arbitration).
+
+### Bug
+- All 8 tabterm-spawned workers had their Telegram plugin alive in process (MCP server registered, tool `plugin:telegram:telegram` listed) but no inbound user messages ever reached the conversation (JSONL had zero real user turns, only stop-hook auto messages).
+- Direct `start-ccx.bat` execution worked fine — bot responded as expected.
+
+### Root cause
+- A pre-existing User-scope environment variable `CLAUDE_ARGS=--dangerously-skip-permissions` (length 30) was overriding tabterm's `.env` value `CLAUDE_ARGS=--dangerously-skip-permissions --channels plugin:telegram@claude-plugins-official` (length 81).
+- `import 'dotenv/config'` calls `dotenv.config()` with defaults, which keeps pre-existing `process.env` values (documented behavior, `override:false`). The longer value from `.env` was silently dropped at startup.
+- Spawned claude command line therefore lacked `--channels plugin:telegram@claude-plugins-official`. The Telegram MCP server still loaded via `enabledPlugins`, and its tool was registered — but the per-channel input routing that `--channels` enables was never wired. Bot received Telegram updates fine (`pending_update_count=0`) but had no path to inject them into the assistant turn stream.
+- `start-ccx.bat` works because its last line passes the flag as hardcoded argv, bypassing env-resolution entirely.
+
+### Fix
+- `server/index.js`: replaced `import 'dotenv/config'` with explicit `import dotenv from 'dotenv'; dotenv.config({ override: true });`.
+- After this change, `.env` becomes the authoritative source for tabterm config — stale User/Machine env vars no longer silently mask updates to the `.env` file.
+
+### Verification
+- Direct dotenv probe from tabterm dir after patch: `process.env.CLAUDE_ARGS` resolves to the full 81-char value including `--channels plugin:telegram@claude-plugins-official`.
+- tabterm restart + worker re-spawn confirmed: Telegram round-trip end-to-end works — bot now receives inbound messages and the conversation turn stream is wired up correctly on all workers.
+
 ## 0.5.1 — 2026-05-20
 
 iPad / iOS Safari Hangul IME jamo-split fix — bottom input rail (ccx peer-reviewed: Claude ∥ Codex).
