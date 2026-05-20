@@ -1,0 +1,28 @@
+{
+  "name": "tabterm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Windows-native browser PTY multiplexer (tabs/splits/reattach/PWA) for headless servers",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "postinstall": "node scripts/copy-vendor.js",
+    "setup-pass": "node scripts/setup-pass.js",
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/rate-limit": "^10.2.2",
+    "@fastify/static": "^8.0.4",
+    "@fastify/websocket": "^11.0.2",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.2.1",
+    "node-pty": "^1.0.0",
+    "split.js": "^1.6.5"
+  }
+}
