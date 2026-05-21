@@ -17,7 +17,12 @@ import { registerWs } from './ws.js';
 import { audit } from './audit.js';
 import { ensureHydraReady, hydraStatus } from './hydra.js';
 import { loadWorkerEnv, buildClaudeInvocation } from './config.js';
-import { listSessionFolders } from './session-folder.js';
+import {
+  listSessionFolders,
+  validateSessionFolderName,
+  ensureMeta,
+  touchLastUsed,
+} from './session-folder.js';
 import { startWatchdog, stopWatchdog } from './watchdog.js';
 import { registerSystemRoutes } from './system.js';
 import { createLabelsStore, validateLabel } from './labels.js';
@@ -314,19 +319,77 @@ app.post('/api/sessions', async (req, reply) => {
     return { session: r.session, envSource: r.envSource, envWarnings: r.envWarnings };
   }
 
-  // general session — no ccx env, fresh dir under WORKERS_ROOT
+  // general session — no ccx env. 두 모드:
+  //   1) cwd 미지정 → 새 폴더 mkdir + tabterm.json 작성 (legacy POST 동작)
+  //   2) cwd 지정 → 기존 폴더에 attach (validate 후), tabterm.json touch
   const inv = buildClaudeInvocation();
-  const ts = new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14);
-  const rand = randomBytes(2).toString('hex');
-  const name = `${NEW_SESSION_PREFIX}${ts}-${rand}`;
-  const cwd = resolve(WORKERS_ROOT, name);
-  try {
-    await mkdir(cwd, { recursive: true });
-  } catch (e) {
-    return reply.code(500).send({ error: 'mkdir-failed', message: String(e?.message || e) });
-  }
-  const sessionLabel = label || name;
   const claudeArgs = process.env.SESSION_CLAUDE_ARGS || '';
+
+  let cwd;
+  let folderName;
+  let createdNow = false;
+
+  if (req.body && typeof req.body.cwd === 'string') {
+    // Mode 2: attach to existing folder
+    const proposedPath = normalize(req.body.cwd);
+    folderName = proposedPath.split(/[\\/]+/).pop() || '';
+    const v = validateSessionFolderName(folderName, {
+      workerPrefix: WORKER_PREFIX,
+      sessionPrefix: NEW_SESSION_PREFIX,
+    });
+    if (!v.ok) return reply.code(400).send({ error: 'bad-cwd', reason: v.error });
+    cwd = resolve(WORKERS_ROOT, folderName);
+    if (resolve(proposedPath) !== cwd) {
+      return reply.code(400).send({ error: 'bad-cwd', reason: 'not-in-workspace' });
+    }
+    if (!existsSync(cwd)) {
+      return reply.code(400).send({ error: 'bad-cwd', reason: 'missing', cwd });
+    }
+    // 동일 cwd alive PTY 검사
+    const existing = sessions.list().filter(
+      (s) => s.kind === 'session' && s.cwd === cwd && s.alive,
+    );
+    if (existing.length > 0 && !req.body.force) {
+      return reply.code(409).send({
+        error: 'session-folder-busy',
+        cwd,
+        existing: existing.map((s) => ({ id: s.id, createdAt: s.createdAt })),
+      });
+    }
+    if (req.body.force && existing.length > 0) {
+      for (const s of existing) {
+        sessions.kill(s.id);
+        audit.log({ event: 'session.folder.evict', id: s.id, cwd, ip: req.ip });
+      }
+    }
+  } else {
+    // Mode 1: 신규 폴더
+    const ts = new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14);
+    const rand = randomBytes(2).toString('hex');
+    folderName = `${NEW_SESSION_PREFIX}${ts}-${rand}`;
+    cwd = resolve(WORKERS_ROOT, folderName);
+    try {
+      await mkdir(cwd, { recursive: true });
+      createdNow = true;
+    } catch (e) {
+      return reply.code(500).send({ error: 'mkdir-failed', message: String(e?.message || e) });
+    }
+  }
+
+  // tabterm.json 자동 작성 (Mode 1) 또는 touch (Mode 2)
+  try {
+    if (createdNow) {
+      await ensureMeta(cwd, { label: typeof label === 'string' ? label : '' });
+    } else {
+      await touchLastUsed(cwd);
+    }
+  } catch (e) {
+    app.log.warn({ err: e?.message, cwd }, '[session] tabterm.json write failed');
+    audit.log({ event: 'session.folder.meta.write.failed', cwd, err: String(e?.message || e), ip: req.ip });
+    // 메타 실패는 PTY spawn 까지 막지 않음
+  }
+
+  const sessionLabel = label || folderName;
   try {
     const s = sessions.create({
       label: sessionLabel,
@@ -340,15 +403,13 @@ app.post('/api/sessions', async (req, reply) => {
       onExit: ({ id, exitCode }) => audit.log({ event: 'session.exit', id, exitCode, kind: 'session' }),
     });
     audit.log({
-      event: 'session.create',
+      event: createdNow ? 'session.folder.create' : 'session.folder.attach',
       id: s.id,
       cwd,
       kind: 'session',
-      envSource: 'none',
-      envWarnings: [],
       ip: req.ip,
     });
-    return { session: s.summary(), envSource: 'none', envWarnings: [] };
+    return { session: s.summary(), envSource: 'none', envWarnings: [], cwd, folderName };
   } catch (e) {
     app.log.error(e);
     return reply.code(500).send({ error: 'spawn-failed', message: String(e?.message || e) });

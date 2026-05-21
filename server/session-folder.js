@@ -113,6 +113,22 @@ export async function setLabel(cwd, label) {
   });
 }
 
+export function validateSessionFolderName(name, { workerPrefix, sessionPrefix }) {
+  if (typeof name !== 'string' || name.length === 0) {
+    return { ok: false, error: 'type' };
+  }
+  if (name.includes('/') || name.includes('\\') || name.includes('..')) {
+    return { ok: false, error: 'bad-path' };
+  }
+  if (name.startsWith(workerPrefix)) {
+    return { ok: false, error: 'worker-protected' };
+  }
+  if (!name.startsWith(sessionPrefix)) {
+    return { ok: false, error: 'bad-prefix' };
+  }
+  return { ok: true, value: name };
+}
+
 // 주어진 root 의 모든 세션 폴더 enumerate. 워커/무관 폴더 제외.
 // ENOENT race 는 정상 skip; unexpected error 는 console.warn 으로 trace.
 export async function listSessionFolders(root, { workerPrefix, sessionPrefix }) {

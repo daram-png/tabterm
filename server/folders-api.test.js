@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { listSessionFolders } from './session-folder.js';
+import { listSessionFolders, validateSessionFolderName } from './session-folder.js';
 
 function setupRoot() {
   const root = mkdtempSync(join(tmpdir(), 'tabterm-root-'));
@@ -69,4 +69,38 @@ test('listSessionFolders: returns [] when root missing', async () => {
     sessionPrefix: 'session-',
   });
   assert.deepEqual(folders, []);
+});
+
+test('validateSessionFolderName: rejects path separators', () => {
+  for (const v of ['../escape', 'a/b', 'a\\b', './rel']) {
+    const r = validateSessionFolderName(v, { workerPrefix: 'worker-', sessionPrefix: 'session-' });
+    assert.equal(r.ok, false, `should reject: ${v}`);
+  }
+});
+
+test('validateSessionFolderName: rejects worker- prefix', () => {
+  const r = validateSessionFolderName('worker-0', { workerPrefix: 'worker-', sessionPrefix: 'session-' });
+  assert.equal(r.ok, false);
+  assert.equal(r.error, 'worker-protected');
+});
+
+test('validateSessionFolderName: rejects non-session- prefix', () => {
+  const r = validateSessionFolderName('random-folder', { workerPrefix: 'worker-', sessionPrefix: 'session-' });
+  assert.equal(r.ok, false);
+  assert.equal(r.error, 'bad-prefix');
+});
+
+test('validateSessionFolderName: accepts valid session name', () => {
+  const r = validateSessionFolderName('session-20260521140000-aaaa', {
+    workerPrefix: 'worker-', sessionPrefix: 'session-',
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.value, 'session-20260521140000-aaaa');
+});
+
+test('validateSessionFolderName: rejects empty/non-string', () => {
+  for (const v of ['', null, undefined, 123, {}]) {
+    const r = validateSessionFolderName(v, { workerPrefix: 'worker-', sessionPrefix: 'session-' });
+    assert.equal(r.ok, false);
+  }
 });
