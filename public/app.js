@@ -144,6 +144,10 @@ function displayName(p) {
 const RENAME_MAX = 32;
 
 function startRename(rowEl, kind, key, currentValue, defaultName) {
+  if (kind === 'session-folder') {
+    console.warn('[startRename] session-folder API binding pending in Task 8');
+    return;
+  }
   if (state.editing) cancelRename();
 
   const nameEl = rowEl.querySelector('.ws-name');
@@ -290,14 +294,26 @@ function renderSidebar() {
   const list = $('#sidebar-list');
   list.innerHTML = '';
 
-  // dynamic sessions (kind=session)
-  const sessions = state.panes.filter((p) => p.kind === 'session');
-  if (sessions.length) {
+  // dynamic sessions: 디스크 폴더 source + alive PTY join
+  const sessionPanes = state.panes.filter((p) => p.kind === 'session');
+  const paneByCwd = new Map();
+  for (const p of sessionPanes) paneByCwd.set(p.cwd, p);
+
+  const folderRows = (state.folders || [])
+    .map((f) => ({
+      folder: f,
+      pane: paneByCwd.get(f.cwd) || null,
+    }))
+    .sort((a, b) => (b.folder.lastUsedAt || 0) - (a.folder.lastUsedAt || 0));
+
+  if (folderRows.length) {
     const h = document.createElement('div');
     h.className = 'ws-section';
     h.textContent = 'sessions';
     list.appendChild(h);
-    for (const p of sessions) list.appendChild(renderRow(p, 'session'));
+    for (const { folder, pane } of folderRows) {
+      list.appendChild(renderSessionFolderRow(folder, pane));
+    }
   }
 
   // header for workers
@@ -368,6 +384,71 @@ function renderRow(p, kindLabel) {
     startRename(el, 'session', p.id, p.label, p.label);
   });
   return el;
+}
+
+function renderSessionFolderRow(folder, pane) {
+  const el = document.createElement('div');
+  const slot = pane ? slotOfPane(pane.id) : -1;
+  const isActive = slot >= 0 && slot === state.activeSlot;
+  el.className = 'ws' + (isActive ? ' active' : '');
+  el.dataset.folderName = folder.name;
+  el.dataset.kind = 'session-folder';
+  if (pane) el.dataset.paneId = pane.id;
+
+  let glyph, gkind, metaText;
+  if (!pane) { glyph = '◇'; gkind = 'idle'; metaText = 'no PTY'; }
+  else if (pane.dead) { glyph = '✗'; gkind = 'dead'; metaText = `exit ${pane.exitCode ?? '?'}`; }
+  else { glyph = '◆'; gkind = 'session'; metaText = slot >= 0 ? (slot === 0 ? 'in slot L' : 'in slot R') : 'detached'; }
+
+  const slotTag = slot >= 0 ? `<span class="ws-slot-tag">${slot === 0 ? 'L' : 'R'}</span>` : '';
+  const name = folder.label || folder.name;
+  const ageText = relativeTime(folder.lastUsedAt);
+
+  el.innerHTML = `
+    <span class="ws-glyph ${gkind}">${glyph}</span>
+    ${slotTag}
+    <span class="ws-rename-btn" data-act="rename" data-kind="session-folder" data-key="${escapeHtml(folder.name)}" title="Rename">${pencilSvg()}</span>
+    <span class="ws-kebab-btn" data-act="kebab" data-key="${escapeHtml(folder.name)}" title="Actions">⋮</span>
+    <div class="ws-name">${escapeHtml(name)}</div>
+    <div class="ws-meta">${escapeHtml(metaText)}${folder.label ? ' · ' + escapeHtml(folder.name) : ''} · ${escapeHtml(ageText)}</div>
+    <div class="ws-path">${escapeHtml(folder.cwd)}</div>
+  `;
+
+  el.addEventListener('click', async (e) => {
+    if (e.target.closest('.ws-rename-btn') || e.target.closest('.ws-kebab-btn') || e.target.closest('.ws-rename-input')) return;
+    if (pane && !pane.dead) {
+      assignToSlot(pane.id);
+    } else {
+      // dead 폴더 클릭 → 새 PTY spawn (Task 8 에서 실구현)
+      await spawnSessionToFolder(folder.cwd);
+    }
+  });
+  el.querySelector('.ws-rename-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    startRename(el, 'session-folder', folder.name, folder.label, folder.name);
+  });
+  el.querySelector('.ws-kebab-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    openKebabMenu(folder, pane, el);
+  });
+  return el;
+}
+
+function relativeTime(ms) {
+  if (!ms) return '';
+  const diff = Date.now() - ms;
+  if (diff < 60_000) return 'just now';
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  return `${Math.floor(diff / 86_400_000)}d ago`;
+}
+
+async function spawnSessionToFolder(cwd) {
+  console.log('TODO Task 8: spawn session', cwd);
+}
+
+function openKebabMenu(folder, pane, anchorEl) {
+  console.log('TODO Task 9: kebab menu', folder, pane);
 }
 
 function renderWorkerRow(i, p) {
