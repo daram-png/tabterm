@@ -138,6 +138,116 @@ function displayName(p) {
   return p.label;
 }
 
+/* ---------- inline rename ---------- */
+const RENAME_MAX = 32;
+
+function startRename(rowEl, kind, key, currentValue, defaultName) {
+  if (state.editing) cancelRename();
+
+  const nameEl = rowEl.querySelector('.ws-name');
+  if (!nameEl) return;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'ws-rename-input';
+  wrap.innerHTML = `
+    <input type="text" maxlength="${RENAME_MAX}" />
+    <span class="ws-rename-counter">0/${RENAME_MAX}</span>
+  `;
+  const input = wrap.querySelector('input');
+  const counter = wrap.querySelector('.ws-rename-counter');
+  const initial = currentValue || '';
+  input.value = initial;
+  counter.textContent = `${input.value.length}/${RENAME_MAX}`;
+
+  for (const evtName of ['pointerdown', 'click', 'mousedown']) {
+    wrap.addEventListener(evtName, (e) => e.stopPropagation());
+  }
+  input.addEventListener('input', () => {
+    counter.textContent = `${input.value.length}/${RENAME_MAX}`;
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitRename();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelRename();
+    }
+  });
+  input.addEventListener('blur', () => {
+    setTimeout(() => {
+      if (state.editing && !state.editing.cancelled) commitRename();
+    }, 0);
+  });
+
+  nameEl.replaceWith(wrap);
+  state.editing = {
+    kind, key, originalValue: initial, defaultName,
+    inputEl: input, wrapEl: wrap, rowEl, cancelled: false,
+  };
+  input.focus();
+  input.select();
+}
+
+async function commitRename() {
+  const ed = state.editing;
+  if (!ed) return;
+  const input = ed.inputEl;
+  input.disabled = true;
+  ed.wrapEl.style.opacity = '0.6';
+
+  const name = input.value;
+  try {
+    if (ed.kind === 'worker') {
+      const r = await api(`/api/labels/worker/${ed.key}`, {
+        method: 'PUT',
+        body: JSON.stringify({ name }),
+      });
+      state.workerLabels = r.workers || {};
+    } else {
+      if (name.trim() === '') {
+        cancelRename();
+        return;
+      }
+      const r = await api(`/api/sessions/${encodeURIComponent(ed.key)}/label`, {
+        method: 'PUT',
+        body: JSON.stringify({ name }),
+      });
+      const pane = paneById(ed.key);
+      if (pane) pane.label = r.label;
+    }
+    state.editing = null;
+    renderSidebar();
+    renderSlotStrip();
+    const activePane = paneById(state.slots[state.activeSlot]);
+    $('#wc-title-text').textContent = activePane ? `tabterm — ${displayName(activePane)}` : 'tabterm';
+    for (const p of state.panes) {
+      if (!p.cellEl) continue;
+      const nameSpan = p.cellEl.querySelector('.session-name');
+      if (nameSpan) {
+        const slot = slotOfPane(p.id);
+        const slotLabel = slot === 0 ? 'slot L' : slot === 1 ? 'slot R' : '';
+        nameSpan.innerHTML = `${escapeHtml(displayName(p))} <span class="ver">${escapeHtml(slotLabel)}</span>`;
+      }
+    }
+  } catch (e) {
+    const msg = e?.body?.reason || e?.body?.error || e?.message || 'rename failed';
+    toast(`rename: ${msg}`, 'err');
+    input.disabled = false;
+    ed.wrapEl.style.opacity = '';
+    input.focus();
+    input.select();
+  }
+}
+
+function cancelRename() {
+  const ed = state.editing;
+  if (!ed) return;
+  ed.cancelled = true;
+  state.editing = null;
+  renderSidebar();
+}
+
 /* ---------- slot routing ---------- */
 function assignToSlot(paneId) {
   const existing = slotOfPane(paneId);
