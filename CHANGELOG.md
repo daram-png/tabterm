@@ -1,9 +1,42 @@
 # Changelog
 
-## Unreleased — design spec only (no code)
+## 0.5.3 — 2026-05-20
+
+Inline rename for worker/session rows (ccx peer-reviewed: spec v2 + implementation diff).
+
+### Feature
+- Sidebar rows now show a pencil icon (always visible, iPad-friendly). Click to rename inline.
+- Worker labels persist to `data/labels.json` with atomic write + `.bak` recovery + corrupted-file preservation.
+- Session labels mutate in-memory only — vanish on session exit.
+- Custom label becomes the primary text; original default (`worker-0`, etc.) shifts to meta line as ` · worker-0`.
+
+### API
+- `GET /api/labels` — list worker labels (auth only).
+- `PUT /api/labels/worker/:idx` — set/clear worker label (auth + CSRF, 1 KB body limit).
+- `PUT /api/sessions/:id/label` — set session label (auth + CSRF, 1 KB body limit). Empty string returns 422 `empty_not_allowed` (sessions have no default to revert to — spec interpretation refined from §6.3 in implementation).
+- `/api/preflight` extended with `workerLabels` and `labelsHealth`.
+
+### Internals
+- New `server/labels.js`: `validateLabel` + `createLabelsStore` with serialized write queue + atomic tmpfile rename + `.bak` rotation + `Object.create(null)` storage to defang prototype pollution.
+- `SessionStore.setLabel(id, name)`.
+- Idempotent no-op: same label → no disk write, no audit log line.
+- Audit events: `label.set.worker`, `label.set.session`, `labels.load.recovered`, `labels.persist.failed`. Label bodies never logged (length only).
+
+### UI
+- `state.workerLabels` + `state.editing` in `public/app.js`.
+- `displayName(p)` helper threads through slot strip, window title, pane header.
+- Inline `<input maxlength=32>` + `x/32` counter — no silent truncate.
+- Esc cancels, Enter/blur commits. Cancelled flag guards deferred-blur double-fire.
+- `renderSidebar` preserves in-progress input across external re-renders (PTY exit, list refresh).
+- `focusActivePane` bails out when `state.editing` is active so iPad iOS IME redirect doesn't steal focus.
+
+### Tests
+- `server/labels.test.js` — 14 `node:test` cases: validateLabel (7) + store roundtrip, recovery from `.bak`, both-corrupted preservation, prototype-pollution defense, concurrent write serialization (7).
 
 ### Spec
-- `docs/superpowers/specs/2026-05-20-tabterm-rename-design.md` — worker/session 인라인 라벨 편집 + 영속 저장 설계 (v2, Codex peer-reviewed). 구현은 별 PR.
+- `docs/superpowers/specs/2026-05-20-tabterm-rename-design.md` (v2, Codex peer-reviewed)
+- `docs/superpowers/plans/2026-05-20-tabterm-rename.md` (12-task implementation plan)
+
 
 ## 0.5.2 — 2026-05-20
 
