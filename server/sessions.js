@@ -113,9 +113,19 @@ class PtySession {
     try { this.pty.write('\x03'); } catch {}
   }
 
-  kill() {
+  // Async kill: signals the PTY, waits for the real exit event (with timeout),
+  // then closes attached WS clients. Awaiting onExit before any downstream
+  // filesystem op prevents the EBUSY race where Windows still holds handles
+  // on the PTY's cwd after pty.kill() returns.
+  async kill(timeoutMs = 5000) {
+    if (!this.alive) return;
     this.alive = false;
     try { this.pty.kill(); } catch {}
+    try {
+      if (typeof this.pty.whenExited === 'function') {
+        await this.pty.whenExited(timeoutMs);
+      }
+    } catch {}
     for (const ws of this.clients) {
       try { ws.close(1000, 'session-killed'); } catch {}
     }
@@ -161,17 +171,25 @@ class SessionStore {
     return s;
   }
 
-  kill(id) {
+  // Returns a Promise<boolean>. Removes the session from the map first so
+  // concurrent lookups don't see it, then awaits Session.kill which waits
+  // for the PTY's onExit event before resolving.
+  async kill(id, timeoutMs = 5000) {
     const s = this.#map.get(id);
     if (!s) return false;
-    s.kill();
     this.#map.delete(id);
+    await s.kill(timeoutMs);
     return true;
   }
 
+  // Best-effort fire-and-forget for shutdown paths. Does not await onExit
+  // because the process is about to exit anyway.
   killAll() {
     for (const s of this.#map.values()) {
-      try { s.kill(); } catch {}
+      try {
+        s.alive = false;
+        s.pty.kill();
+      } catch {}
     }
     this.#map.clear();
   }

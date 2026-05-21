@@ -1,4 +1,4 @@
-const VERSION = 'tabterm-v11-session-folders';
+const VERSION = 'tabterm-v12-kill-race-panes-cleanup';
 const SHELL = [
   '/',
   '/index.html',
