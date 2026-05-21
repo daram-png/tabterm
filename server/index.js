@@ -339,6 +339,10 @@ app.post('/api/sessions', async (req, reply) => {
     });
     if (!v.ok) return reply.code(400).send({ error: 'bad-cwd', reason: v.error });
     cwd = resolve(WORKERS_ROOT, folderName);
+    // Defence in depth: even after basename validation, ensure the original
+    // proposedPath resolves to exactly the same absolute path as WORKERS_ROOT/folderName.
+    // Blocks traversal attempts like "C:/workspace/../foo/session-abc" where basename
+    // looks fine but the parent path escapes WORKERS_ROOT.
     if (resolve(proposedPath) !== cwd) {
       return reply.code(400).send({ error: 'bad-cwd', reason: 'not-in-workspace' });
     }

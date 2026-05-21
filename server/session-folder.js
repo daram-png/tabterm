@@ -19,6 +19,7 @@ function parseSafe(text) {
 }
 
 const CONTROL_RE = /[\x00-\x1f\x7f]/g;
+const CONTROL_RE_TEST = /[\x00-\x1f\x7f]/;
 function clampLabel(v) {
   if (typeof v !== 'string') return '';
   const t = v.trim().replace(CONTROL_RE, '');
@@ -116,6 +117,9 @@ export async function setLabel(cwd, label) {
 export function validateSessionFolderName(name, { workerPrefix, sessionPrefix }) {
   if (typeof name !== 'string' || name.length === 0) {
     return { ok: false, error: 'type' };
+  }
+  if (CONTROL_RE_TEST.test(name)) {
+    return { ok: false, error: 'bad-path' };
   }
   if (name.includes('/') || name.includes('\\') || name.includes('..')) {
     return { ok: false, error: 'bad-path' };

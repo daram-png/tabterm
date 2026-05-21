@@ -104,3 +104,11 @@ test('validateSessionFolderName: rejects empty/non-string', () => {
     assert.equal(r.ok, false);
   }
 });
+
+test('validateSessionFolderName: rejects control chars (null byte, etc)', () => {
+  for (const v of ['session-abc\x00', 'session-\x01x', 'session-\x7f']) {
+    const r = validateSessionFolderName(v, { workerPrefix: 'worker-', sessionPrefix: 'session-' });
+    assert.equal(r.ok, false, `should reject: ${JSON.stringify(v)}`);
+    assert.equal(r.error, 'bad-path');
+  }
+});
