@@ -112,6 +112,8 @@ const state = {
   split: null,
   workerLabels: {},      // { "0": "pixiechess", ... } — from preflight + PUT responses
   editing: null,         // { kind, key, originalValue, defaultName, inputEl, wrapEl, rowEl, cancelled }
+  folders: [],           // GET /api/sessions/folders 결과 (디스크 enumerate)
+  foldersLoadedAt: 0,
 };
 
 /* ---------- helpers ---------- */
@@ -943,6 +945,37 @@ function initImeBar() {
   });
 }
 
+/* ---------- folders fetch ---------- */
+async function fetchFolders() {
+  try {
+    const r = await fetch('/api/sessions/folders', { credentials: 'same-origin' });
+    if (!r.ok) throw new Error(`folders fetch ${r.status}`);
+    const j = await r.json();
+    state.folders = j.folders || [];
+    state.foldersLoadedAt = Date.now();
+  } catch (e) {
+    console.warn('[folders] fetch failed', e);
+  }
+}
+
+async function refreshAll() {
+  // Fetch live sessions and disk folders in parallel, then re-render sidebar.
+  // Sessions are fetched inline in init(); this helper is for subsequent refreshes
+  // triggered by folder mutations (POST/PUT/DELETE folder) in Tasks 7-9.
+  await Promise.all([
+    (async () => {
+      try {
+        const cur = await api('/api/sessions');
+        for (const s of (cur.sessions || [])) {
+          if (!paneById(s.id)) addPaneFromServer(s);
+        }
+      } catch (e) { console.warn('[refreshAll] sessions fetch failed', e); }
+    })(),
+    fetchFolders(),
+  ]);
+  renderSidebar();
+}
+
 /* ---------- init ---------- */
 async function init() {
   try {
@@ -962,16 +995,21 @@ async function init() {
     }
   } catch (e) { console.error(e); }
 
-  try {
-    const cur = await api('/api/sessions');
-    if (cur.sessions?.length) {
-      for (const s of cur.sessions) addPaneFromServer(s);
-      // restore first up to 2 into slots
-      const live = state.panes.slice(0, 2);
-      if (live[0]) { state.slots[0] = live[0].id; state.activeSlot = 0; state.slotCursor = 1; }
-      if (live[1]) { state.slots[1] = live[1].id; state.slotCursor = 0; }
-    }
-  } catch (e) { console.error(e); }
+  await Promise.all([
+    (async () => {
+      try {
+        const cur = await api('/api/sessions');
+        if (cur.sessions?.length) {
+          for (const s of cur.sessions) addPaneFromServer(s);
+          // restore first up to 2 into slots
+          const live = state.panes.slice(0, 2);
+          if (live[0]) { state.slots[0] = live[0].id; state.activeSlot = 0; state.slotCursor = 1; }
+          if (live[1]) { state.slots[1] = live[1].id; state.slotCursor = 0; }
+        }
+      } catch (e) { console.error(e); }
+    })(),
+    fetchFolders(),
+  ]);
 
   buildLayout();
   renderSidebar();
