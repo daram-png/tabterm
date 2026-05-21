@@ -1,4 +1,4 @@
-const VERSION = 'tabterm-v9-ios-ime';
+const VERSION = 'tabterm-v10-rename-labels';
 const SHELL = [
   '/',
   '/index.html',
