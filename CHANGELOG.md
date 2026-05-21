@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.6.2 — 2026-05-22
+
+### Fixed
+- `POST /api/system/cleanup-zombies` 가 외부 watchdog 때문에 무력화되던 문제
+  - 원인: master 의 cleanup-zombies 는 watchdog PID 를 protected set 에 두기만 하고 watchdog 자체는 멈추지 않음. 외부 `C:/workspace/watchdog/watchdog.js` 가 30초 사이클로 죽은 claude/bot 을 부활시켜 정리 효과가 날아감
+  - 수정: cleanup-zombies 진입 시 `stopWatchdog` 먼저 호출. 응답에 `watchdogStopped` 포함
+  - 사용자는 정리 후 `/api/system/boot-all` 로 워커 재spawn → boot-all 끝에 `startWatchdog` 자동 재시작
+- `cleanup-zombies` taskkill 에 `/T` (tree kill) 추가
+  - 원인: `bun.exe` 의 `server.ts` 자식, `cmd.exe` 의 `claude` 자식이 단일 PID kill 로는 잔존 → 다음 정리 사이클에서도 같은 좀비 반복 발견
+  - 수정: `taskkill /F /T /PID` 로 트리 전체 종료
+
+### Added
+- `scripts/diagnose-workers.ps1` — `Win32_Process` 기반 워커별 PID / PPID / CommandLine / 시작시간 그룹핑, 중복 워커 식별 (read-only)
+- `scripts/cleanup-orphans.ps1` — 진단 후 orphan 프로세스 정리 보조 스크립트
+
+### Notes
+- 분리 브랜치 `feat/telegram-pairing-force-confirm` 의 부분 반영 (옵션 A — Codex peer review 합의)
+- `kill-stale-bot.js` + `spawnWorkerSession` force evict + UI 409 confirm 은 별도 후속 작업으로 분리 (UI 미완료 + 분리 브랜치 base stale 위험)
+
 ## 0.6.1 — 2026-05-21
 
 ### Fixed
