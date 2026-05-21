@@ -367,42 +367,6 @@ function renderSidebar() {
   }
 }
 
-function renderRow(p, kindLabel) {
-  const el = document.createElement('div');
-  const slot = slotOfPane(p.id);
-  const isActive = slot >= 0 && slot === state.activeSlot;
-  el.className = 'ws' + (isActive ? ' active' : '');
-  el.dataset.paneId = p.id;
-  el.dataset.kind = 'session';
-
-  let glyph, gkind;
-  if (p.dead) { glyph = '✗'; gkind = 'dead'; }
-  else if (p.kind === 'session') { glyph = '◆'; gkind = 'session'; }
-  else { glyph = '●'; gkind = 'run'; }
-
-  const meta = p.dead ? `exit ${p.exitCode ?? '?'}` : (slot >= 0 ? (slot === 0 ? 'in slot L' : 'in slot R') : 'detached');
-  const slotTag = slot >= 0 ? `<span class="ws-slot-tag">${slot === 0 ? 'L' : 'R'}</span>` : '';
-  const name = displayName(p);
-
-  el.innerHTML = `
-    <span class="ws-glyph ${gkind}">${glyph}</span>
-    ${slotTag}
-    <span class="ws-rename-btn" data-act="rename" data-kind="session" data-key="${escapeHtml(p.id)}" title="Rename">${pencilSvg()}</span>
-    <div class="ws-name">${escapeHtml(name)}</div>
-    <div class="ws-meta">${escapeHtml(meta)}</div>
-    <div class="ws-path">${escapeHtml(p.cwd || '')}</div>
-  `;
-  el.addEventListener('click', (e) => {
-    if (e.target.closest('.ws-rename-btn') || e.target.closest('.ws-rename-input')) return;
-    assignToSlot(p.id);
-  });
-  el.querySelector('.ws-rename-btn').addEventListener('click', (e) => {
-    e.stopPropagation();
-    startRename(el, 'session', p.id, p.label, p.label);
-  });
-  return el;
-}
-
 function renderSessionFolderRow(folder, pane) {
   const el = document.createElement('div');
   const slot = pane ? slotOfPane(pane.id) : -1;
