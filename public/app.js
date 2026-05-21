@@ -270,6 +270,7 @@ function detachFromSlots(paneId) {
 
 /* ---------- sidebar ---------- */
 function renderSidebar() {
+  const ed = state.editing;
   const list = $('#sidebar-list');
   list.innerHTML = '';
 
@@ -293,6 +294,27 @@ function renderSidebar() {
   for (let i = 0; i < state.workersCount; i++) {
     const p = paneByWorker(i);
     list.appendChild(renderWorkerRow(i, p));
+  }
+
+  // Preserve in-progress rename across re-renders: re-attach live input to the
+  // freshly rendered row so the user's input isn't destroyed.
+  if (ed && !ed.cancelled) {
+    let freshRow = null;
+    if (ed.kind === 'worker') {
+      freshRow = list.querySelector(`.ws[data-worker-index="${ed.key}"]`);
+    } else {
+      freshRow = list.querySelector(`.ws[data-pane-id="${CSS.escape(String(ed.key))}"]`);
+    }
+    if (freshRow) {
+      const placeholder = freshRow.querySelector('.ws-name');
+      if (placeholder) {
+        placeholder.replaceWith(ed.wrapEl);
+        ed.rowEl = freshRow;
+        if (!ed.inputEl.disabled && document.activeElement !== ed.inputEl) {
+          ed.inputEl.focus();
+        }
+      }
+    }
   }
 }
 
@@ -530,6 +552,8 @@ function buildLayout() {
 // On iOS we never want focus on xterm's helper textarea (broken IME path);
 // redirect to the rail textarea so Hangul composition stays inside it.
 function focusActivePane(pane) {
+  // Do not steal focus from an in-progress rename input.
+  if (state.editing && !state.editing.cancelled) return;
   if (document.body.classList.contains('ios-ime')) {
     document.getElementById('ime-input')?.focus();
     return;
