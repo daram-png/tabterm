@@ -19,6 +19,7 @@ import { ensureHydraReady, hydraStatus } from './hydra.js';
 import { loadWorkerEnv, buildClaudeInvocation } from './config.js';
 import { startWatchdog, stopWatchdog } from './watchdog.js';
 import { registerSystemRoutes } from './system.js';
+import { createLabelsStore, validateLabel } from './labels.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const HOST = process.env.HOST || '127.0.0.1';
@@ -147,6 +148,8 @@ app.get('/api/preflight', async (req, reply) => {
     claudeArgs: inv.argsStr,
     anthropicBaseUrl: ANTHROPIC_BASE_URL,
     hydra: { enabled: HYDRA_ENABLED, ...hydraStatus() },
+    workerLabels: labelsStore.getWorkers(),
+    labelsHealth: labelsStore.labelsHealth,
   };
 });
 
@@ -163,6 +166,80 @@ app.get('/api/sessions', async (req, reply) => {
   if (!requireAuth(req, reply)) return;
   return { sessions: sessions.list() };
 });
+
+app.get('/api/labels', async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  return { version: 1, workers: labelsStore.getWorkers() };
+});
+
+app.put('/api/labels/worker/:idx', {
+  config: { rateLimit: false },
+  bodyLimit: 1024,
+}, async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  if (!requireCsrf(req, reply)) return;
+  const raw = req.params.idx;
+  if (!/^(0|[1-9]\d*)$/.test(raw)) return reply.code(400).send({ error: 'bad_idx' });
+  const idx = Number(raw);
+  if (!Number.isSafeInteger(idx) || idx < 0 || idx >= WORKERS_COUNT) {
+    return reply.code(400).send({ error: 'bad_idx' });
+  }
+  const v = validateLabel(req.body?.name);
+  if (!v.ok) return reply.code(422).send({ error: 'validation', field: 'name', reason: v.error });
+
+  const current = labelsStore.getWorkerLabel(idx);
+  if ((current ?? '') === v.value) {
+    return {
+      ok: true,
+      workerIndex: idx,
+      label: v.value === '' ? null : v.value,
+      workers: labelsStore.getWorkers(),
+    };
+  }
+  try {
+    const stored = await labelsStore.setWorkerLabel(idx, v.value);
+    audit.log({
+      event: 'label.set.worker',
+      workerIndex: idx,
+      length: v.value.length,
+      cleared: v.value === '',
+      ip: req.ip,
+    });
+    return {
+      ok: true,
+      workerIndex: idx,
+      label: stored,
+      workers: labelsStore.getWorkers(),
+    };
+  } catch (e) {
+    app.log.error({ err: e?.message, workerIndex: idx }, '[labels] persist failed');
+    audit.log({ event: 'labels.persist.failed', workerIndex: idx, errno: e?.code || e?.message });
+    return reply.code(500).send({ error: 'labels_persist_failed' });
+  }
+});
+
+app.put('/api/sessions/:id/label', {
+  config: { rateLimit: false },
+  bodyLimit: 1024,
+}, async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  if (!requireCsrf(req, reply)) return;
+  const v = validateLabel(req.body?.name);
+  if (!v.ok) return reply.code(422).send({ error: 'validation', field: 'name', reason: v.error });
+  if (v.value === '') return reply.code(422).send({ error: 'validation', field: 'name', reason: 'empty_not_allowed' });
+  const id = req.params.id;
+  const summary = sessions.setLabel(id, v.value);
+  if (!summary) return reply.code(404).send({ error: 'session_not_found' });
+  audit.log({
+    event: 'label.set.session',
+    id,
+    length: v.value.length,
+    cleared: false,
+    ip: req.ip,
+  });
+  return { ok: true, id, label: summary.label, session: summary };
+});
+
 
 // Extracted so /api/system/boot-all can spawn workers without re-implementing
 // hydra preflight, env loading, audit logging, or args building. Returns
@@ -312,6 +389,14 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGBREAK', () => shutdown('SIGBREAK'));
 
 await auth.load();
+const labelsStore = await createLabelsStore({
+  dataDir: resolve(ROOT, 'data'),
+  workersCount: WORKERS_COUNT,
+  logger: app.log,
+});
+if (labelsStore.labelsHealth !== 'ok') {
+  audit.log({ event: 'labels.load.recovered', from: labelsStore.labelsHealth === 'restored_from_bak' ? 'bak' : 'reset' });
+}
 const issues = preflight();
 if (issues.length) {
   app.log.warn({ issues }, '[preflight] some worker dirs missing — sessions will fail until fixed');
