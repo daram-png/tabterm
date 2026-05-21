@@ -22,6 +22,7 @@ import {
   validateSessionFolderName,
   ensureMeta,
   touchLastUsed,
+  setLabel as setFolderLabel,
 } from './session-folder.js';
 import { startWatchdog, stopWatchdog } from './watchdog.js';
 import { registerSystemRoutes } from './system.js';
@@ -254,6 +255,46 @@ app.put('/api/sessions/:id/label', {
     ip: req.ip,
   });
   return { ok: true, id, label: summary.label, session: summary };
+});
+
+app.put('/api/sessions/folders/:name/label', {
+  config: { rateLimit: false },
+  bodyLimit: 1024,
+}, async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  if (!requireCsrf(req, reply)) return;
+  const v = validateSessionFolderName(req.params.name, {
+    workerPrefix: WORKER_PREFIX,
+    sessionPrefix: NEW_SESSION_PREFIX,
+  });
+  if (!v.ok) return reply.code(400).send({ error: 'bad-name', reason: v.error });
+  const labelV = validateLabel(req.body?.name);
+  if (!labelV.ok) return reply.code(422).send({ error: 'validation', field: 'name', reason: labelV.error });
+
+  const cwd = resolve(WORKERS_ROOT, v.value);
+  if (!existsSync(cwd)) return reply.code(404).send({ error: 'folder-not-found', cwd });
+
+  try {
+    await setFolderLabel(cwd, labelV.value);
+  } catch (e) {
+    app.log.error({ err: e?.message, cwd }, '[folder-label] persist failed');
+    audit.log({ event: 'session.folder.label.set.failed', cwd, err: String(e?.message || e), ip: req.ip });
+    return reply.code(500).send({ error: 'persist-failed' });
+  }
+
+  // 동일 cwd alive PTY 가 있으면 메모리 라벨 동기화
+  const matched = sessions.list().filter((s) => s.kind === 'session' && s.cwd === cwd && s.alive);
+  for (const s of matched) sessions.setLabel(s.id, labelV.value || v.value);
+
+  audit.log({
+    event: 'session.folder.label.set',
+    cwd,
+    length: labelV.value.length,
+    cleared: labelV.value === '',
+    matchedSessions: matched.length,
+    ip: req.ip,
+  });
+  return { ok: true, folder: { name: v.value, cwd, label: labelV.value } };
 });
 
 
