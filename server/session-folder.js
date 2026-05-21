@@ -1,10 +1,10 @@
 // session-folder.js — 일반 세션 폴더의 tabterm.json 메타 read/write
 // 각 폴더가 자체 라벨 / 타임스탬프 영속. 워커 라벨(중앙 labels.json) 과 분리.
 
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import {
-  readFile, writeFile, rename, stat, unlink,
+  readFile, writeFile, rename, stat, unlink, readdir,
 } from 'node:fs/promises';
 
 export const SCHEMA_VERSION = 1;
@@ -111,4 +111,29 @@ export async function setLabel(cwd, label) {
     createdAt: meta.createdAt,
     lastUsedAt: meta.lastUsedAt,
   });
+}
+
+// 주어진 root 의 모든 세션 폴더 enumerate. 워커/무관 폴더 제외.
+// 폴더별 메타 read 실패는 skip (race 시 폴더 삭제됨 등) — caller 가 warn 책임.
+export async function listSessionFolders(root, { workerPrefix, sessionPrefix }) {
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const ent of entries) {
+    if (!ent.isDirectory()) continue;
+    if (ent.name.startsWith(workerPrefix)) continue;
+    if (!ent.name.startsWith(sessionPrefix)) continue;
+    const cwd = resolve(root, ent.name);
+    try {
+      const meta = await readMeta(cwd);
+      out.push({ name: ent.name, cwd, ...meta });
+    } catch {
+      // ENOENT race (폴더 삭제됨) 등 skip
+    }
+  }
+  return out;
 }

@@ -17,6 +17,7 @@ import { registerWs } from './ws.js';
 import { audit } from './audit.js';
 import { ensureHydraReady, hydraStatus } from './hydra.js';
 import { loadWorkerEnv, buildClaudeInvocation } from './config.js';
+import { listSessionFolders } from './session-folder.js';
 import { startWatchdog, stopWatchdog } from './watchdog.js';
 import { registerSystemRoutes } from './system.js';
 import { createLabelsStore, validateLabel } from './labels.js';
@@ -165,6 +166,20 @@ app.post('/api/hydra/ensure', async (req, reply) => {
 app.get('/api/sessions', async (req, reply) => {
   if (!requireAuth(req, reply)) return;
   return { sessions: sessions.list() };
+});
+
+app.get('/api/sessions/folders', async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  try {
+    const folders = await listSessionFolders(WORKERS_ROOT, {
+      workerPrefix: WORKER_PREFIX,
+      sessionPrefix: NEW_SESSION_PREFIX,
+    });
+    return { folders };
+  } catch (e) {
+    app.log.error({ err: e?.message }, '[folders] enumerate failed');
+    return reply.code(500).send({ error: 'folders-enumerate-failed' });
+  }
 });
 
 app.get('/api/labels', async (req, reply) => {
