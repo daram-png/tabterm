@@ -144,10 +144,6 @@ function displayName(p) {
 const RENAME_MAX = 32;
 
 function startRename(rowEl, kind, key, currentValue, defaultName) {
-  if (kind === 'session-folder') {
-    console.warn('[startRename] session-folder API binding pending in Task 8');
-    return;
-  }
   if (state.editing) cancelRename();
 
   const nameEl = rowEl.querySelector('.ws-name');
@@ -217,6 +213,24 @@ async function commitRename() {
         body: JSON.stringify({ name }),
       });
       state.workerLabels = r.workers || {};
+    } else if (ed.kind === 'session-folder') {
+      if (name.trim() === '') {
+        toast('rename: empty label not allowed for session folders', 'err');
+        input.disabled = false;
+        ed.wrapEl.style.opacity = '';
+        ed.committing = false;
+        input.focus();
+        input.select();
+        return;
+      }
+      await api(`/api/sessions/folders/${encodeURIComponent(ed.key)}/label`, {
+        method: 'PUT',
+        body: JSON.stringify({ name }),
+      });
+      // Sync folder label into local state so sidebar reflects change immediately,
+      // then refreshAll to pull authoritative server state.
+      const folder = (state.folders || []).find((f) => f.name === ed.key);
+      if (folder) folder.label = name;
     } else {
       if (name.trim() === '') {
         // Sessions don't support clearing → surface to the user instead of silent cancel.
@@ -249,6 +263,8 @@ async function commitRename() {
         nameSpan.innerHTML = `${escapeHtml(displayName(p))} <span class="ver">${escapeHtml(slotLabel)}</span>`;
       }
     }
+    // session-folder: pull authoritative state from server (label persisted to tabterm.json)
+    if (ed.kind === 'session-folder') refreshAll();
   } catch (e) {
     const msg = e?.body?.reason || e?.body?.error || e?.message || 'rename failed';
     toast(`rename: ${msg}`, 'err');
@@ -445,7 +461,38 @@ function relativeTime(ms) {
 }
 
 async function spawnSessionToFolder(cwd) {
-  console.log('TODO Task 8: spawn session', cwd);
+  try {
+    const r = await fetch('/api/sessions', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        ...csrfHeader(),
+      },
+      body: JSON.stringify({ kind: 'session', cwd, cols: 120, rows: 32 }),
+    });
+    if (r.status === 409) {
+      const data = await r.json();
+      const ok = window.confirm(`이 폴더에 다른 세션이 살아있습니다. 종료하고 새로 시작할까요?\n(${data.existing?.length || 0}개)`);
+      if (!ok) return;
+      const r2 = await fetch('/api/sessions', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          ...csrfHeader(),
+        },
+        body: JSON.stringify({ kind: 'session', cwd, cols: 120, rows: 32, force: true }),
+      });
+      if (!r2.ok) throw new Error(`spawn force failed ${r2.status}`);
+    } else if (!r.ok) {
+      throw new Error(`spawn failed ${r.status}`);
+    }
+    await refreshAll();
+  } catch (e) {
+    console.error('[spawn] folder attach failed', e);
+    alert(`세션 spawn 실패: ${e.message}`);
+  }
 }
 
 function openKebabMenu(folder, pane, anchorEl) {
