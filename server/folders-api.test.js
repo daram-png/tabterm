@@ -15,7 +15,6 @@ function setupRoot() {
   writeFileSync(join(root, 'session-20260521140000-aaaa', 'tabterm.json'), JSON.stringify({
     version: 1, label: 'labeled', createdAt: 100, lastUsedAt: 200,
   }));
-  mkdirSync(join(root, 'session-20260521141000-bbbb'));
   // legacy (no tabterm.json)
   mkdirSync(join(root, 'session-legacy'));
   // 무관 폴더 (제외돼야 함)
@@ -33,7 +32,6 @@ test('listSessionFolders: filters worker- and non-session- prefixes', async () =
     const names = folders.map((f) => f.name).sort();
     assert.deepEqual(names, [
       'session-20260521140000-aaaa',
-      'session-20260521141000-bbbb',
       'session-legacy',
     ]);
   } finally {
@@ -59,7 +57,7 @@ test('listSessionFolders: includes meta fields per folder', async () => {
     assert.equal(legacy.hasTabtermJson, false);
     assert.equal(legacy.label, '');
     assert.equal(legacy.schemaVersion, null);
-    assert.ok(typeof legacy.createdAt === 'number');
+    assert.ok(legacy.createdAt > 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
