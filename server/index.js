@@ -9,7 +9,7 @@ import { resolve, dirname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
 
 import { auth } from './auth.js';
 import { sessions } from './sessions.js';
@@ -475,6 +475,51 @@ app.delete('/api/sessions/:id', async (req, reply) => {
   const ok = sessions.kill(req.params.id);
   audit.log({ event: 'session.delete', id: req.params.id, ok, ip: req.ip });
   return { ok };
+});
+
+app.delete('/api/sessions/folders/:name', async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  if (!requireCsrf(req, reply)) return;
+  const v = validateSessionFolderName(req.params.name, {
+    workerPrefix: WORKER_PREFIX,
+    sessionPrefix: NEW_SESSION_PREFIX,
+  });
+  if (v.error === 'worker-protected') {
+    return reply.code(403).send({ error: 'worker-folder-protected' });
+  }
+  if (!v.ok) return reply.code(400).send({ error: 'bad-name', reason: v.error });
+
+  const cwd = resolve(WORKERS_ROOT, v.value);
+  // Defence in depth: ensure cwd is exactly a direct child of WORKERS_ROOT
+  // (validateSessionFolderName already rejects path separators, but containment
+  // check protects against future validate changes or env-dependent path normalization)
+  const root = resolve(WORKERS_ROOT);
+  const sep = cwd.includes('\\') ? '\\' : '/';
+  if (!cwd.startsWith(root + sep)) {
+    return reply.code(400).send({ error: 'bad-path' });
+  }
+  if (!existsSync(cwd)) return reply.code(404).send({ error: 'folder-not-found' });
+
+  // 1) alive PTY kill (동일 cwd 의 session kind)
+  const matched = sessions.list().filter((s) => s.kind === 'session' && s.cwd === cwd && s.alive);
+  for (const s of matched) sessions.kill(s.id);
+
+  // 2) 폴더 자체 rm -rf
+  try {
+    await rm(cwd, { recursive: true, force: true });
+  } catch (e) {
+    app.log.error({ err: e?.message, cwd }, '[folder-delete] rm failed');
+    audit.log({ event: 'session.folder.delete.failed', cwd, err: String(e?.message || e), ip: req.ip });
+    return reply.code(500).send({ error: 'rm-failed', message: String(e?.message || e) });
+  }
+
+  audit.log({
+    event: 'session.folder.delete',
+    cwd,
+    killedSessions: matched.length,
+    ip: req.ip,
+  });
+  return { ok: true, deleted: v.value };
 });
 
 await app.register(fastifyStatic, {
