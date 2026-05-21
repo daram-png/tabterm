@@ -403,6 +403,7 @@ function renderSessionFolderRow(folder, pane) {
   const slotTag = slot >= 0 ? `<span class="ws-slot-tag">${slot === 0 ? 'L' : 'R'}</span>` : '';
   const name = folder.label || folder.name;
   const ageText = relativeTime(folder.lastUsedAt);
+  const agePart = ageText ? ' · ' + escapeHtml(ageText) : '';
 
   el.innerHTML = `
     <span class="ws-glyph ${gkind}">${glyph}</span>
@@ -410,7 +411,7 @@ function renderSessionFolderRow(folder, pane) {
     <span class="ws-rename-btn" data-act="rename" data-kind="session-folder" data-key="${escapeHtml(folder.name)}" title="Rename">${pencilSvg()}</span>
     <span class="ws-kebab-btn" data-act="kebab" data-key="${escapeHtml(folder.name)}" title="Actions">⋮</span>
     <div class="ws-name">${escapeHtml(name)}</div>
-    <div class="ws-meta">${escapeHtml(metaText)}${folder.label ? ' · ' + escapeHtml(folder.name) : ''} · ${escapeHtml(ageText)}</div>
+    <div class="ws-meta">${escapeHtml(metaText)}${folder.label ? ' · ' + escapeHtml(folder.name) : ''}${agePart}</div>
     <div class="ws-path">${escapeHtml(folder.cwd)}</div>
   `;
 
