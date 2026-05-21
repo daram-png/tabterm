@@ -9,6 +9,8 @@ import {
   getWatchdogState,
   getWatchdogHealth,
   tailWatchdogLog,
+  startWatchdog,
+  stopWatchdog,
 } from './watchdog.js';
 
 const execFileAsync = promisify(execFile);
@@ -80,6 +82,12 @@ export function registerSystemRoutes(app, ctx) {
     if (!requireAuth(req, reply)) return;
     if (!requireCsrf(req, reply)) return;
 
+    // Stop the watchdog FIRST. The external watchdog at WATCHDOG_PATH
+    // respawns dead claude/bot processes on its own schedule, so anything we
+    // kill here gets undone within a cycle. Leave it stopped until the user
+    // explicitly reboots via /api/system/boot-all, which restarts it.
+    const watchdogStopped = stopWatchdog(app.log);
+
     const processMap = await listProcessSnapshot();
     if (processMap.size === 0) {
       audit.log({ event: 'system.cleanup-zombies.aborted', reason: 'process-list-empty', ip: req.ip });
@@ -108,7 +116,10 @@ export function registerSystemRoutes(app, ctx) {
     const failed = [];
     for (const t of targets) {
       try {
-        await execFileAsync('taskkill.exe', ['/F', '/PID', String(t.pid)], { windowsHide: true });
+        // /T = kill the whole tree. Without it bun.exe wrappers leave their
+        // server.ts children alive (and vice versa), so duplicates persist
+        // and the next cleanup pass keeps finding them.
+        await execFileAsync('taskkill.exe', ['/F', '/T', '/PID', String(t.pid)], { windowsHide: true });
         killed.push(t);
       } catch (e) {
         failed.push({ ...t, error: String(e?.message || e).slice(0, 200) });
@@ -123,6 +134,7 @@ export function registerSystemRoutes(app, ctx) {
       protectedCount: protectedSet.size,
       processCount: processMap.size,
       rootPids: roots,
+      watchdogStopped,
     });
 
     return {
@@ -130,6 +142,7 @@ export function registerSystemRoutes(app, ctx) {
       failed,
       protectedPids: [...protectedSet],
       processCount: processMap.size,
+      watchdogStopped,
     };
   });
 
@@ -173,6 +186,12 @@ export function registerSystemRoutes(app, ctx) {
       }
     }
 
+    // Restart the watchdog after spawning workers. cleanup-zombies leaves
+    // it stopped (it has to, or our kills get undone within a cycle), so
+    // boot-all is the one place that re-arms monitoring without requiring
+    // a server restart. startWatchdog is a no-op if already running.
+    const watchdogResult = await startWatchdog(app.log);
+
     audit.log({
       event: 'system.boot-all',
       ip: req.ip,
@@ -180,9 +199,10 @@ export function registerSystemRoutes(app, ctx) {
       skippedCount: skipped.length,
       failedCount: failed.length,
       gapMs: gap,
+      watchdog: watchdogResult,
     });
 
-    return { spawned, skipped, failed, intervalMs: gap };
+    return { spawned, skipped, failed, intervalMs: gap, watchdog: watchdogResult };
   });
 
   app.get('/api/system/watchdog-status', async (req, reply) => {

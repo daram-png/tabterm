@@ -1,4 +1,4 @@
-const VERSION = 'tabterm-v12-kill-race-panes-cleanup';
+const VERSION = 'tabterm-v13-watchdog-stop-tree-kill';
 const SHELL = [
   '/',
   '/index.html',
