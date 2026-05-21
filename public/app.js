@@ -1141,17 +1141,39 @@ async function refreshAll() {
   // Fetch live sessions and disk folders in parallel, then re-render sidebar.
   // Sessions are fetched inline in init(); this helper is for subsequent refreshes
   // triggered by folder mutations (POST/PUT/DELETE folder) in Tasks 7-9.
+  //
+  // Also reconciles state.panes against the server: session-kind panes whose
+  // server session disappeared (e.g. after folder delete) are pruned. Without
+  // this the WebSocket and xterm instances stay alive and leak memory.
+  let prunedSlots = false;
   await Promise.all([
     (async () => {
       try {
         const cur = await api('/api/sessions');
+        const serverIds = new Set((cur.sessions || []).map((s) => s.id));
         for (const s of (cur.sessions || [])) {
           if (!paneById(s.id)) addPaneFromServer(s);
+        }
+        // Prune only 'session' kind. worker/general kinds use restart UX so
+        // their dead panes stay visible for user-initiated respawn.
+        const stale = state.panes.filter(
+          (p) => p.kind === 'session' && !serverIds.has(p.sessionId),
+        );
+        for (const p of stale) {
+          try { p.ws?.close(); } catch {}
+          try { p.term?.dispose?.(); } catch {}
+          detachFromSlots(p.id);
+          prunedSlots = true;
+        }
+        if (stale.length) {
+          const staleIds = new Set(stale.map((p) => p.id));
+          state.panes = state.panes.filter((p) => !staleIds.has(p.id));
         }
       } catch (e) { console.warn('[refreshAll] sessions fetch failed', e); }
     })(),
     fetchFolders(),
   ]);
+  if (prunedSlots) { buildLayout(); renderSlotStrip(); }
   renderSidebar();
 }
 

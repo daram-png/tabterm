@@ -51,7 +51,33 @@ export function spawnPty({ command, cwd, cols, rows, extraEnv = {}, claudeArgs }
   });
 
   let alive = true;
-  pty.onExit(() => { alive = false; });
+  const exitWaiters = new Set();
+  pty.onExit(() => {
+    alive = false;
+    for (const r of exitWaiters) {
+      try { r('exit'); } catch {}
+    }
+    exitWaiters.clear();
+  });
+
+  // Resolve when the PTY process actually exits (or timeoutMs elapses).
+  // Returns 'already-dead' | 'exit' | 'timeout'. Used by Session.kill so that
+  // rm -rf on the PTY cwd can wait for Windows to release file handles before
+  // running (EBUSY race on ConPTY teardown).
+  function whenExited(timeoutMs = 5000) {
+    if (!alive) return Promise.resolve('already-dead');
+    return new Promise((resolve) => {
+      const t = setTimeout(() => {
+        exitWaiters.delete(resolve);
+        resolve('timeout');
+      }, timeoutMs);
+      const wrap = (kind) => {
+        clearTimeout(t);
+        resolve(kind);
+      };
+      exitWaiters.add(wrap);
+    });
+  }
 
   return {
     onData(cb) { pty.onData(cb); },
@@ -62,6 +88,8 @@ export function spawnPty({ command, cwd, cols, rows, extraEnv = {}, claudeArgs }
       if (!alive) return;
       try { pty.kill(); } catch {}
     },
+    whenExited,
+    get alive() { return alive; },
     pid: pty.pid,
     _quoteCmdArg: quoteCmdArg,
   };

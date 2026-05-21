@@ -40,6 +40,26 @@ const HYDRA_ENABLED = String(process.env.HYDRATEAMS_ENABLED ?? 'true') === 'true
 const ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL || 'http://localhost:3456';
 const NEW_SESSION_PREFIX = process.env.NEW_SESSION_PREFIX || 'session-';
 
+// On Windows, even after pty.kill() and onExit fire, descendant processes
+// or antivirus/indexers can transiently hold the cwd. Retry rm with
+// exponential backoff on EBUSY / EPERM / ENOTEMPTY.
+async function rmWithRetry(path, opts, { attempts = 5, baseDelayMs = 50 } = {}) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      await rm(path, opts);
+      return;
+    } catch (e) {
+      lastErr = e;
+      const code = e?.code;
+      if (code !== 'EBUSY' && code !== 'EPERM' && code !== 'ENOTEMPTY') throw e;
+      if (i === attempts - 1) break;
+      await new Promise((r) => setTimeout(r, baseDelayMs * 2 ** i));
+    }
+  }
+  throw lastErr;
+}
+
 function preflight() {
   const issues = [];
   if (!existsSync(WORKERS_ROOT)) issues.push(`WORKERS_ROOT missing: ${WORKERS_ROOT}`);
@@ -402,10 +422,10 @@ app.post('/api/sessions', async (req, reply) => {
       });
     }
     if (req.body.force && existing.length > 0) {
-      for (const s of existing) {
-        sessions.kill(s.id);
+      await Promise.all(existing.map(async (s) => {
+        await sessions.kill(s.id);
         audit.log({ event: 'session.folder.evict', id: s.id, cwd, ip: req.ip });
-      }
+      }));
     }
   } else {
     // Mode 1: 신규 폴더
@@ -472,7 +492,7 @@ registerSystemRoutes(app, {
 app.delete('/api/sessions/:id', async (req, reply) => {
   if (!requireAuth(req, reply)) return;
   if (!requireCsrf(req, reply)) return;
-  const ok = sessions.kill(req.params.id);
+  const ok = await sessions.kill(req.params.id);
   audit.log({ event: 'session.delete', id: req.params.id, ok, ip: req.ip });
   return { ok };
 });
@@ -500,13 +520,15 @@ app.delete('/api/sessions/folders/:name', async (req, reply) => {
   }
   if (!existsSync(cwd)) return reply.code(404).send({ error: 'folder-not-found' });
 
-  // 1) alive PTY kill (동일 cwd 의 session kind)
+  // 1) alive PTY kill (동일 cwd 의 session kind) — await onExit before rm
+  //    so Windows releases ConPTY/shell handles on cwd. See rmWithRetry below
+  //    for the backoff that catches descendant processes / AV holding handles.
   const matched = sessions.list().filter((s) => s.kind === 'session' && s.cwd === cwd && s.alive);
-  for (const s of matched) sessions.kill(s.id);
+  await Promise.all(matched.map((s) => sessions.kill(s.id)));
 
-  // 2) 폴더 자체 rm -rf
+  // 2) 폴더 자체 rm -rf, with EBUSY/EPERM/ENOTEMPTY retry
   try {
-    await rm(cwd, { recursive: true, force: true });
+    await rmWithRetry(cwd, { recursive: true, force: true });
   } catch (e) {
     app.log.error({ err: e?.message, cwd }, '[folder-delete] rm failed');
     audit.log({ event: 'session.folder.delete.failed', cwd, err: String(e?.message || e), ip: req.ip });

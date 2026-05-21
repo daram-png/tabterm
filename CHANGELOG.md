@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.1 — 2026-05-21
+
+### Fixed
+- `DELETE /api/sessions/folders/:name` 의 EBUSY 500 race
+  - 원인: `sessions.kill()` 이 PTY 시그널만 보내고 `onExit` 안 기다림 → Windows ConPTY 가 cwd 파일 핸들 잡은 채로 `rm -rf` 호출 → EBUSY
+  - 수정: `Session.kill()` / `SessionStore.kill()` 비동기화, `pty.whenExited(timeoutMs)` await
+  - 추가 안전망: `rmWithRetry` 가 EBUSY/EPERM/ENOTEMPTY 에 exponential backoff (50/100/200/400/800ms)
+    - 자식·손자 프로세스 잔존, antivirus/indexer, ConPTY teardown lag 등 외부 holder 대응
+- 클라이언트 `state.panes` ghost entry 누수
+  - 원인: `refreshAll()` 이 서버에 있는 세션을 추가만 하고 사라진 세션을 제거하지 않음 → 폴더 delete 후 dangling WebSocket + xterm 인스턴스가 영구 잔존 → slow memory leak
+  - 수정: `refreshAll()` 에서 server 응답에 없는 `kind === 'session'` pane 을 prune (ws.close + term.dispose + detachFromSlots)
+  - worker/general kind 는 restart UX 때문에 유지 (의도적 미수정)
+
+### Tests
+- `server/pty-kill-race.test.js` 추가 (5 케이스)
+  - `sessions.kill` 이 `onExit` await 후 resolve
+  - kill 직후 rm 이 EBUSY 없이 통과
+  - `rmWithRetry` EBUSY 재시도 / 비복구성 에러 즉시 throw
+  - `sessions.kill` 멱등성
+
 ## 0.6.0 — 2026-05-21
 
 ### Added
