@@ -114,6 +114,7 @@ const state = {
   editing: null,         // { kind, key, originalValue, defaultName, inputEl, wrapEl, rowEl, cancelled }
   folders: [],           // GET /api/sessions/folders 결과 (디스크 enumerate)
   foldersLoadedAt: 0,
+  kebabMenu: null,
 };
 
 /* ---------- helpers ---------- */
@@ -496,7 +497,92 @@ async function spawnSessionToFolder(cwd) {
 }
 
 function openKebabMenu(folder, pane, anchorEl) {
-  console.log('TODO Task 9: kebab menu', folder, pane);
+  closeKebabMenu();
+  const menu = document.createElement('div');
+  menu.className = 'ws-kebab-menu';
+  const rect = anchorEl.getBoundingClientRect();
+  menu.style.top = `${rect.bottom + 2}px`;
+  menu.style.left = `${rect.right - 120}px`;
+
+  const killBtn = document.createElement('button');
+  killBtn.className = 'ws-kebab-item';
+  killBtn.textContent = 'Kill PTY';
+  killBtn.disabled = !pane || pane.dead;
+  killBtn.addEventListener('click', async () => {
+    closeKebabMenu();
+    if (!confirm('이 세션 PTY 를 종료할까요? 폴더와 라벨은 유지됩니다.')) return;
+    await killSessionFolder(pane.id);
+  });
+
+  const delBtn = document.createElement('button');
+  delBtn.className = 'ws-kebab-item danger';
+  delBtn.textContent = 'Delete folder…';
+  delBtn.addEventListener('click', async () => {
+    closeKebabMenu();
+    await deleteSessionFolder(folder);
+  });
+
+  menu.appendChild(killBtn);
+  menu.appendChild(delBtn);
+  document.body.appendChild(menu);
+  state.kebabMenu = menu;
+
+  setTimeout(() => {
+    document.addEventListener('click', closeKebabMenuOnce, { once: true, capture: true });
+  }, 0);
+}
+
+function closeKebabMenuOnce(e) {
+  if (state.kebabMenu && !state.kebabMenu.contains(e.target)) {
+    closeKebabMenu();
+  } else {
+    document.addEventListener('click', closeKebabMenuOnce, { once: true, capture: true });
+  }
+}
+
+function closeKebabMenu() {
+  if (state.kebabMenu) {
+    state.kebabMenu.remove();
+    state.kebabMenu = null;
+  }
+}
+
+async function killSessionFolder(paneId) {
+  try {
+    const r = await fetch(`/api/sessions/${paneId}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+      headers: csrfHeader(),
+    });
+    if (!r.ok) throw new Error(`kill failed ${r.status}`);
+    await refreshAll();
+  } catch (e) {
+    alert(`PTY kill 실패: ${e.message}`);
+  }
+}
+
+async function deleteSessionFolder(folder) {
+  const name = folder.label || folder.name;
+  if (!confirm(`"${name}" 폴더를 완전히 삭제합니다.\n복구 불가. 폴더 안 모든 파일이 사라집니다.\n계속할까요?`)) return;
+  const typed = window.prompt(`확인을 위해 폴더명을 정확히 입력하세요:\n${folder.name}`);
+  if (typed !== folder.name) {
+    alert('입력이 일치하지 않습니다. 삭제 취소.');
+    return;
+  }
+  try {
+    const r = await fetch(`/api/sessions/folders/${encodeURIComponent(folder.name)}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+      headers: csrfHeader(),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.error || `delete failed ${r.status}`);
+    }
+    await refreshAll();
+  } catch (e) {
+    alert(`폴더 삭제 실패: ${e.message}`);
+  }
 }
 
 function renderWorkerRow(i, p) {
