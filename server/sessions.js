@@ -133,6 +133,13 @@ class SessionStore {
     return this.#map.get(id);
   }
 
+  setLabel(id, name) {
+    const s = this.#map.get(id);
+    if (!s || !s.alive) return null;
+    s.label = name;
+    return s.summary();
+  }
+
   create({ label, cwd, command, cols, rows, onExit, extraEnv, claudeArgs, meta }) {
     const id = randomBytes(8).toString('hex');
     const pty = spawnPty({ command, cwd, cols, rows, extraEnv, claudeArgs });

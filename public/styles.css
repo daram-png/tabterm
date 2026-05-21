@@ -166,6 +166,46 @@ html, body {
 .ws-meta { font-size: 11px; color: var(--text-2); line-height: 1.4; margin-top: 2px; word-break: break-word; }
 .ws-path { font-size: 10.5px; color: var(--muted); margin-top: 3px; font-family: "Geist Mono", monospace; }
 
+/* ─── inline rename ─── */
+.ws { padding-right: 36px; } /* room for pencil */
+.ws-rename-btn {
+  position: absolute;
+  right: 10px; top: 9px;
+  width: 18px; height: 18px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 4px;
+  opacity: 0.7;
+}
+.ws-rename-btn:hover { color: var(--text); background: rgba(255,255,255,0.05); opacity: 1; }
+.ws.active .ws-rename-btn { color: #c7d6f5; opacity: 0.85; }
+.ws.active .ws-rename-btn:hover { color: #fff; background: rgba(255,255,255,0.15); opacity: 1; }
+.ws-slot-tag ~ .ws-rename-btn { right: 36px; } /* shift left when slot tag present */
+
+.ws-rename-input {
+  display: flex; align-items: center; gap: 6px;
+}
+.ws-rename-input input {
+  flex: 1; min-width: 0;
+  padding: 2px 6px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  font-family: "Geist", system-ui, sans-serif;
+  font-size: 12.5px;
+  outline: none;
+}
+.ws-rename-input input:disabled { opacity: 0.6; }
+.ws-rename-counter {
+  font-family: "Geist Mono", monospace;
+  font-size: 10px;
+  color: var(--muted);
+  user-select: none;
+}
+.ws.active .ws-rename-counter { color: #c7d6f5 !important; }
+
 .sidebar-foot {
   border-top: 1px solid var(--line);
   padding: 8px 10px;

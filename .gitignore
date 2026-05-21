@@ -1,6 +1,10 @@
 node_modules/
 data/auth.json
 data/audit.log
+data/labels.json
+data/labels.json.bak
+data/labels.json.tmp-*
+data/labels.json.corrupted-*
 .env
 public/vendor/
 logs/

@@ -110,6 +110,8 @@ const state = {
   preflightIssues: [],
   hydra: { enabled: true, ready: false },
   split: null,
+  workerLabels: {},      // { "0": "pixiechess", ... } — from preflight + PUT responses
+  editing: null,         // { kind, key, originalValue, defaultName, inputEl, wrapEl, rowEl, cancelled }
 };
 
 /* ---------- helpers ---------- */
@@ -126,6 +128,138 @@ function slotOfPane(id) {
   if (state.slots[0] === id) return 0;
   if (state.slots[1] === id) return 1;
   return -1;
+}
+function displayName(p) {
+  if (!p) return '';
+  if (p.kind === 'worker') {
+    const custom = state.workerLabels[p.workerIndex];
+    return custom || p.label;
+  }
+  return p.label;
+}
+
+/* ---------- inline rename ---------- */
+const RENAME_MAX = 32;
+
+function startRename(rowEl, kind, key, currentValue, defaultName) {
+  if (state.editing) cancelRename();
+
+  const nameEl = rowEl.querySelector('.ws-name');
+  if (!nameEl) return;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'ws-rename-input';
+  wrap.innerHTML = `
+    <input type="text" maxlength="${RENAME_MAX}" />
+    <span class="ws-rename-counter">0/${RENAME_MAX}</span>
+  `;
+  const input = wrap.querySelector('input');
+  const counter = wrap.querySelector('.ws-rename-counter');
+  const initial = currentValue || '';
+  input.value = initial;
+  counter.textContent = `${input.value.length}/${RENAME_MAX}`;
+
+  for (const evtName of ['pointerdown', 'click', 'mousedown']) {
+    wrap.addEventListener(evtName, (e) => e.stopPropagation());
+  }
+  input.addEventListener('input', () => {
+    counter.textContent = `${input.value.length}/${RENAME_MAX}`;
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitRename();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelRename();
+    }
+  });
+  input.addEventListener('blur', () => {
+    setTimeout(() => {
+      if (state.editing && !state.editing.cancelled) commitRename();
+    }, 0);
+  });
+
+  nameEl.replaceWith(wrap);
+  state.editing = {
+    kind, key, originalValue: initial, defaultName,
+    inputEl: input, wrapEl: wrap, rowEl, cancelled: false,
+  };
+  input.focus();
+  input.select();
+}
+
+async function commitRename() {
+  const ed = state.editing;
+  if (!ed) return;
+  if (ed.committing) return; // in-flight guard (Enter + blur double-fire)
+  ed.committing = true;
+  const input = ed.inputEl;
+  input.disabled = true;
+  ed.wrapEl.style.opacity = '0.6';
+
+  let name = input.value;
+  // Worker: if the value matches the default name (e.g. "worker-0"), treat as clear.
+  // The prefill seeds the default to make minor edits easy; hitting Enter unchanged
+  // should not persist the default as a custom label.
+  const isWorkerNoop = ed.kind === 'worker' && name.trim() === ed.defaultName;
+  if (isWorkerNoop) name = '';
+  try {
+    if (ed.kind === 'worker') {
+      const r = await api(`/api/labels/worker/${ed.key}`, {
+        method: 'PUT',
+        body: JSON.stringify({ name }),
+      });
+      state.workerLabels = r.workers || {};
+    } else {
+      if (name.trim() === '') {
+        // Sessions don't support clearing → surface to the user instead of silent cancel.
+        toast('rename: empty label not allowed for sessions', 'err');
+        input.disabled = false;
+        ed.wrapEl.style.opacity = '';
+        ed.committing = false;
+        input.focus();
+        input.select();
+        return;
+      }
+      const r = await api(`/api/sessions/${encodeURIComponent(ed.key)}/label`, {
+        method: 'PUT',
+        body: JSON.stringify({ name }),
+      });
+      const pane = paneById(ed.key);
+      if (pane) pane.label = r.label;
+    }
+    state.editing = null;
+    renderSidebar();
+    renderSlotStrip();
+    const activePane = paneById(state.slots[state.activeSlot]);
+    $('#wc-title-text').textContent = activePane ? `tabterm — ${displayName(activePane)}` : 'tabterm';
+    for (const p of state.panes) {
+      if (!p.cellEl) continue;
+      const nameSpan = p.cellEl.querySelector('.session-name');
+      if (nameSpan) {
+        const slot = slotOfPane(p.id);
+        const slotLabel = slot === 0 ? 'slot L' : slot === 1 ? 'slot R' : '';
+        nameSpan.innerHTML = `${escapeHtml(displayName(p))} <span class="ver">${escapeHtml(slotLabel)}</span>`;
+      }
+    }
+  } catch (e) {
+    const msg = e?.body?.reason || e?.body?.error || e?.message || 'rename failed';
+    toast(`rename: ${msg}`, 'err');
+    input.disabled = false;
+    ed.wrapEl.style.opacity = '';
+    ed.committing = false;
+    input.focus();
+    input.select();
+  }
+}
+
+function cancelRename() {
+  const ed = state.editing;
+  if (!ed) return;
+  ed.cancelled = true;
+  state.editing = null;
+  renderSidebar();
 }
 
 /* ---------- slot routing ---------- */
@@ -150,6 +284,7 @@ function detachFromSlots(paneId) {
 
 /* ---------- sidebar ---------- */
 function renderSidebar() {
+  const ed = state.editing;
   const list = $('#sidebar-list');
   list.innerHTML = '';
 
@@ -174,6 +309,27 @@ function renderSidebar() {
     const p = paneByWorker(i);
     list.appendChild(renderWorkerRow(i, p));
   }
+
+  // Preserve in-progress rename across re-renders: re-attach live input to the
+  // freshly rendered row so the user's input isn't destroyed.
+  if (ed && !ed.cancelled) {
+    let freshRow = null;
+    if (ed.kind === 'worker') {
+      freshRow = list.querySelector(`.ws[data-worker-index="${ed.key}"]`);
+    } else {
+      freshRow = list.querySelector(`.ws[data-pane-id="${CSS.escape(String(ed.key))}"]`);
+    }
+    if (freshRow) {
+      const placeholder = freshRow.querySelector('.ws-name');
+      if (placeholder) {
+        placeholder.replaceWith(ed.wrapEl);
+        ed.rowEl = freshRow;
+        if (!ed.inputEl.disabled && document.activeElement !== ed.inputEl) {
+          ed.inputEl.focus();
+        }
+      }
+    }
+  }
 }
 
 function renderRow(p, kindLabel) {
@@ -182,6 +338,7 @@ function renderRow(p, kindLabel) {
   const isActive = slot >= 0 && slot === state.activeSlot;
   el.className = 'ws' + (isActive ? ' active' : '');
   el.dataset.paneId = p.id;
+  el.dataset.kind = 'session';
 
   let glyph, gkind;
   if (p.dead) { glyph = '✗'; gkind = 'dead'; }
@@ -190,15 +347,24 @@ function renderRow(p, kindLabel) {
 
   const meta = p.dead ? `exit ${p.exitCode ?? '?'}` : (slot >= 0 ? (slot === 0 ? 'in slot L' : 'in slot R') : 'detached');
   const slotTag = slot >= 0 ? `<span class="ws-slot-tag">${slot === 0 ? 'L' : 'R'}</span>` : '';
+  const name = displayName(p);
 
   el.innerHTML = `
     <span class="ws-glyph ${gkind}">${glyph}</span>
     ${slotTag}
-    <div class="ws-name">${escapeHtml(p.label)}</div>
+    <span class="ws-rename-btn" data-act="rename" data-kind="session" data-key="${escapeHtml(p.id)}" title="Rename">${pencilSvg()}</span>
+    <div class="ws-name">${escapeHtml(name)}</div>
     <div class="ws-meta">${escapeHtml(meta)}</div>
     <div class="ws-path">${escapeHtml(p.cwd || '')}</div>
   `;
-  el.addEventListener('click', () => assignToSlot(p.id));
+  el.addEventListener('click', (e) => {
+    if (e.target.closest('.ws-rename-btn') || e.target.closest('.ws-rename-input')) return;
+    assignToSlot(p.id);
+  });
+  el.querySelector('.ws-rename-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    startRename(el, 'session', p.id, p.label, p.label);
+  });
   return el;
 }
 
@@ -208,6 +374,7 @@ function renderWorkerRow(i, p) {
   const isActive = slot >= 0 && slot === state.activeSlot;
   el.className = 'ws' + (isActive ? ' active' : '');
   el.dataset.workerIndex = String(i);
+  el.dataset.kind = 'worker';
 
   const dirMissing = state.preflightIssues.some((s) => s.includes(`${state.workerPrefix}${i}`));
   let glyph = '*', gkind = 'idle', meta = 'idle';
@@ -219,14 +386,21 @@ function renderWorkerRow(i, p) {
   }
   const slotTag = (p && slot >= 0) ? `<span class="ws-slot-tag">${slot === 0 ? 'L' : 'R'}</span>` : '';
 
+  const defaultName = state.workerPrefix + i;
+  const customLabel = state.workerLabels[i];
+  const name = customLabel || defaultName;
+  const metaText = customLabel ? `${meta} · ${defaultName}` : meta;
+
   el.innerHTML = `
     <span class="ws-glyph ${gkind}">${glyph}</span>
     ${slotTag}
-    <div class="ws-name">${escapeHtml(state.workerPrefix + i)}</div>
-    <div class="ws-meta">${escapeHtml(meta)}</div>
-    <div class="ws-path">${escapeHtml(state.workersRoot + '/' + state.workerPrefix + i)}</div>
+    <span class="ws-rename-btn" data-act="rename" data-kind="worker" data-key="${i}" title="Rename">${pencilSvg()}</span>
+    <div class="ws-name">${escapeHtml(name)}</div>
+    <div class="ws-meta">${escapeHtml(metaText)}</div>
+    <div class="ws-path">${escapeHtml(state.workersRoot + '/' + defaultName)}</div>
   `;
-  el.addEventListener('click', async () => {
+  el.addEventListener('click', async (e) => {
+    if (e.target.closest('.ws-rename-btn') || e.target.closest('.ws-rename-input')) return;
     if (p) { assignToSlot(p.id); return; }
     try {
       const r = await api('/api/sessions', {
@@ -236,6 +410,11 @@ function renderWorkerRow(i, p) {
       addPaneFromServer(r.session);
       assignToSlot(r.session.id);
     } catch (err) { toast(`spawn failed: ${err.message || err}`, 'err'); }
+  });
+  el.querySelector('.ws-rename-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    // Spec §3.3: prefill with current custom label, or fall back to the default name.
+    startRename(el, 'worker', i, customLabel || defaultName, defaultName);
   });
   return el;
 }
@@ -248,7 +427,7 @@ function renderSlotStrip() {
     const p = pid ? paneById(pid) : null;
     chip.classList.toggle('focused', i === state.activeSlot && !!pid);
     chip.classList.toggle('empty', !pid);
-    chip.querySelector('.slot-label').textContent = p ? p.label : 'empty';
+    chip.querySelector('.slot-label').textContent = p ? displayName(p) : 'empty';
     chip.onclick = pid ? () => { state.activeSlot = i; renderSidebar(); renderSlotStrip(); focusActivePane(paneById(pid)); } : null;
   }
 }
@@ -282,7 +461,7 @@ function paneHtml(p, slotLabel) {
     <div class="session-header">
       <div class="session-icon">${claudeMascotSvg(32)}</div>
       <div class="session-meta">
-        <div class="session-name">${escapeHtml(p.label)} <span class="ver">${slotLabel}</span></div>
+        <div class="session-name">${escapeHtml(displayName(p))} <span class="ver">${slotLabel}</span></div>
         <div class="session-sub">${p.kind === 'worker' ? 'ccx hybrid' : 'general session'}<span class="sep">·</span><span class="session-path">${escapeHtml(p.cwd || '')}</span></div>
       </div>
       <div class="session-tools">
@@ -301,6 +480,10 @@ function paneHtml(p, slotLabel) {
       <span class="sb-right"><span class="dot ${p.dead ? 'dead' : ''}"></span>${p.dead ? `exit ${p.exitCode ?? '?'}` : 'attached'}</span>
     </div>
   `;
+}
+
+function pencilSvg() {
+  return `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 2.5 L13.5 4.5 L5 13 L2.5 13.5 L3 11 Z"/><path d="M10 4 L12 6"/></svg>`;
 }
 
 function claudeMascotSvg(size) {
@@ -378,12 +561,14 @@ function buildLayout() {
   renderSlotStrip();
   const activePane = paneById(state.slots[state.activeSlot]);
   focusActivePane(activePane);
-  $('#wc-title-text').textContent = activePane ? `tabterm — ${activePane.label}` : 'tabterm';
+  $('#wc-title-text').textContent = activePane ? `tabterm — ${displayName(activePane)}` : 'tabterm';
 }
 
 // On iOS we never want focus on xterm's helper textarea (broken IME path);
 // redirect to the rail textarea so Hangul composition stays inside it.
 function focusActivePane(pane) {
+  // Do not steal focus from an in-progress rename input.
+  if (state.editing && !state.editing.cancelled) return;
   if (document.body.classList.contains('ios-ime')) {
     document.getElementById('ime-input')?.focus();
     return;
@@ -770,6 +955,10 @@ async function init() {
     if (state.hydra.enabled) {
       if (state.hydra.ready) toast('HydraTeams ready', 'ok', 3000);
       else toast('HydraTeams NOT ready — workers may fail', 'err', 0);
+    }
+    state.workerLabels = pre.workerLabels || {};
+    if (pre.labelsHealth && pre.labelsHealth !== 'ok') {
+      toast(`labels: ${pre.labelsHealth}`, pre.labelsHealth === 'corrupted_reset' ? 'err' : 'amber', 6000);
     }
   } catch (e) { console.error(e); }
 
