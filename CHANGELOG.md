@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — design spec only (no code)
+
+### Spec
+- `docs/superpowers/specs/2026-05-20-tabterm-rename-design.md` — worker/session 인라인 라벨 편집 + 영속 저장 설계 (v2, Codex peer-reviewed). 구현은 별 PR.
+
 ## 0.5.2 — 2026-05-20
 
 dotenv `override: true` — fixes all-workers Telegram plugin unresponsive (ccx peer-reviewed: Claude ∥ Codex final arbitration).
