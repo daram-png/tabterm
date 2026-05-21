@@ -169,3 +169,65 @@ test('labels: concurrent sets are serialized (no lost writes)', async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('labels: setWorkerLabel returns { label, changed } and is idempotent', async () => {
+  const dir = tmpDataDir();
+  try {
+    const s = await createLabelsStore({ dataDir: dir, workersCount: 8 });
+    const r1 = await s.setWorkerLabel(0, 'pixie');
+    assert.deepEqual(r1, { label: 'pixie', changed: true });
+    const r2 = await s.setWorkerLabel(0, 'pixie');
+    assert.deepEqual(r2, { label: 'pixie', changed: false });
+    const r3 = await s.setWorkerLabel(0, '');
+    assert.deepEqual(r3, { label: null, changed: true });
+    const r4 = await s.setWorkerLabel(0, '');
+    assert.deepEqual(r4, { label: null, changed: false });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('labels: concurrent same-key writes — only one actually persists', async () => {
+  const dir = tmpDataDir();
+  try {
+    const s = await createLabelsStore({ dataDir: dir, workersCount: 8 });
+    const results = await Promise.all([
+      s.setWorkerLabel(0, 'same'),
+      s.setWorkerLabel(0, 'same'),
+      s.setWorkerLabel(0, 'same'),
+    ]);
+    const changedCount = results.filter((r) => r.changed).length;
+    assert.equal(changedCount, 1, `expected 1 changed, got ${changedCount}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('labels: schema-invalid main → bak restored', async () => {
+  const dir = tmpDataDir();
+  try {
+    const good = JSON.stringify({ version: 1, workers: { '2': 'kept' } });
+    writeFileSync(join(dir, 'labels.json.bak'), good);
+    // valid JSON but invalid schema (wrong version)
+    writeFileSync(join(dir, 'labels.json'), JSON.stringify({ version: 2, workers: {} }));
+    const s = await createLabelsStore({ dataDir: dir, workersCount: 8 });
+    assert.deepEqual(s.getWorkers(), { '2': 'kept' });
+    assert.equal(s.labelsHealth, 'restored_from_bak');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('labels: main missing but bak present → restored', async () => {
+  const dir = tmpDataDir();
+  try {
+    const good = JSON.stringify({ version: 1, workers: { '0': 'recovered' } });
+    writeFileSync(join(dir, 'labels.json.bak'), good);
+    // simulate a botched write that left main missing and bak intact
+    const s = await createLabelsStore({ dataDir: dir, workersCount: 8 });
+    assert.deepEqual(s.getWorkers(), { '0': 'recovered' });
+    assert.equal(s.labelsHealth, 'restored_from_bak');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

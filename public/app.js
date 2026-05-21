@@ -192,11 +192,18 @@ function startRename(rowEl, kind, key, currentValue, defaultName) {
 async function commitRename() {
   const ed = state.editing;
   if (!ed) return;
+  if (ed.committing) return; // in-flight guard (Enter + blur double-fire)
+  ed.committing = true;
   const input = ed.inputEl;
   input.disabled = true;
   ed.wrapEl.style.opacity = '0.6';
 
-  const name = input.value;
+  let name = input.value;
+  // Worker: if the value matches the default name (e.g. "worker-0"), treat as clear.
+  // The prefill seeds the default to make minor edits easy; hitting Enter unchanged
+  // should not persist the default as a custom label.
+  const isWorkerNoop = ed.kind === 'worker' && name.trim() === ed.defaultName;
+  if (isWorkerNoop) name = '';
   try {
     if (ed.kind === 'worker') {
       const r = await api(`/api/labels/worker/${ed.key}`, {
@@ -206,7 +213,13 @@ async function commitRename() {
       state.workerLabels = r.workers || {};
     } else {
       if (name.trim() === '') {
-        cancelRename();
+        // Sessions don't support clearing → surface to the user instead of silent cancel.
+        toast('rename: empty label not allowed for sessions', 'err');
+        input.disabled = false;
+        ed.wrapEl.style.opacity = '';
+        ed.committing = false;
+        input.focus();
+        input.select();
         return;
       }
       const r = await api(`/api/sessions/${encodeURIComponent(ed.key)}/label`, {
@@ -235,6 +248,7 @@ async function commitRename() {
     toast(`rename: ${msg}`, 'err');
     input.disabled = false;
     ed.wrapEl.style.opacity = '';
+    ed.committing = false;
     input.focus();
     input.select();
   }
@@ -399,7 +413,8 @@ function renderWorkerRow(i, p) {
   });
   el.querySelector('.ws-rename-btn').addEventListener('click', (e) => {
     e.stopPropagation();
-    startRename(el, 'worker', i, customLabel || '', defaultName);
+    // Spec §3.3: prefill with current custom label, or fall back to the default name.
+    startRename(el, 'worker', i, customLabel || defaultName, defaultName);
   });
   return el;
 }

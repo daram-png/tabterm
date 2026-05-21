@@ -49,6 +49,17 @@ async function safeReadJson(p) {
   }
 }
 
+function isValidSchema(raw) {
+  return (
+    raw &&
+    typeof raw === 'object' &&
+    raw.version === 1 &&
+    raw.workers &&
+    typeof raw.workers === 'object' &&
+    !Array.isArray(raw.workers)
+  );
+}
+
 async function pathExists(p) {
   try { await stat(p); return true; } catch { return false; }
 }
@@ -91,19 +102,26 @@ export async function createLabelsStore({ dataDir, workersCount, logger }) {
     }
   }
 
-  // load priority: main → bak → corrupted_reset
+  // load priority:
+  //   1) main present + parses + valid schema → use main
+  //   2) main missing/corrupt OR schema invalid → try bak; restore main from bak
+  //   3) both missing/corrupt → preserve corrupted main (if any), start empty
   const mainRaw = await safeReadJson(mainPath);
-  if (mainRaw) {
+  const mainPresent = await pathExists(mainPath);
+  const mainSchemaOk = isValidSchema(mainRaw);
+
+  if (mainSchemaOk) {
     workers = sanitizeLoaded(mainRaw, workersCount);
-  } else if (await pathExists(mainPath)) {
-    // file exists but unreadable / invalid JSON
+  } else {
+    // main is missing, unreadable, or schema-invalid → consult bak
     const bakRaw = await safeReadJson(bakPath);
-    if (bakRaw) {
+    if (isValidSchema(bakRaw)) {
       workers = sanitizeLoaded(bakRaw, workersCount);
       labelsHealth = 'restored_from_bak';
-      log.warn?.('[labels] main corrupt — restored from .bak');
+      log.warn?.('[labels] main corrupt or missing — restored from .bak');
       await writeMainAtomic({ version: SCHEMA_VERSION, workers: plain(workers) });
-    } else {
+    } else if (mainPresent) {
+      // both broken; preserve the corrupted main, start empty
       const ts = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14);
       const corruptedName = `labels.json.corrupted-${ts}-${randomBytes(2).toString('hex')}`;
       try {
@@ -112,6 +130,7 @@ export async function createLabelsStore({ dataDir, workersCount, logger }) {
       labelsHealth = 'corrupted_reset';
       log.error?.('[labels] main + bak corrupt — started empty, preserved as', corruptedName);
     }
+    // else: fresh dir — nothing to preserve, workers stays empty, labelsHealth stays 'ok'
   }
 
   // serialized write queue
@@ -126,6 +145,8 @@ export async function createLabelsStore({ dataDir, workersCount, logger }) {
     return typeof v === 'string' ? v : null;
   }
 
+  // Returns: { label: string|null, changed: boolean }
+  //   changed=false → idempotent no-op (caller skips audit/write side effects).
   async function setWorkerLabel(idx, name) {
     if (!Number.isSafeInteger(idx) || idx < 0 || idx >= workersCount) {
       throw new Error('bad_idx');
@@ -137,14 +158,21 @@ export async function createLabelsStore({ dataDir, workersCount, logger }) {
       throw e;
     }
     const job = writing.then(async () => {
+      // Idempotency check inside the queue — protects against two concurrent
+      // PUTs for the same key seeing the same "current" before either commits.
+      const currentKey = String(idx);
+      const current = workers[currentKey] ?? '';
+      if (current === r.value) {
+        return { label: r.value === '' ? null : r.value, changed: false };
+      }
       const next = Object.create(null);
       for (const k of Object.keys(workers)) next[k] = workers[k];
-      if (r.value === '') delete next[String(idx)];
-      else next[String(idx)] = r.value;
+      if (r.value === '') delete next[currentKey];
+      else next[currentKey] = r.value;
       // disk first, then cache (spec §5.1: cache update only after success)
       await writeMainAtomic({ version: SCHEMA_VERSION, workers: plain(next) });
       workers = next;
-      return r.value === '' ? null : r.value;
+      return { label: r.value === '' ? null : r.value, changed: true };
     });
     writing = job.catch(() => {}); // queue continues even if a job throws
     return job;

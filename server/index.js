@@ -187,28 +187,24 @@ app.put('/api/labels/worker/:idx', {
   const v = validateLabel(req.body?.name);
   if (!v.ok) return reply.code(422).send({ error: 'validation', field: 'name', reason: v.error });
 
-  const current = labelsStore.getWorkerLabel(idx);
-  if ((current ?? '') === v.value) {
-    return {
-      ok: true,
-      workerIndex: idx,
-      label: v.value === '' ? null : v.value,
-      workers: labelsStore.getWorkers(),
-    };
-  }
   try {
-    const stored = await labelsStore.setWorkerLabel(idx, v.value);
-    audit.log({
-      event: 'label.set.worker',
-      workerIndex: idx,
-      length: v.value.length,
-      cleared: v.value === '',
-      ip: req.ip,
-    });
+    const { label, changed } = await labelsStore.setWorkerLabel(idx, v.value);
+    // Audit only on actual change — idempotent no-ops produce no log noise and
+    // (per the queue-internal check in labels.js) cannot race with concurrent
+    // identical PUTs to produce duplicate writes/audits.
+    if (changed) {
+      audit.log({
+        event: 'label.set.worker',
+        workerIndex: idx,
+        length: v.value.length,
+        cleared: v.value === '',
+        ip: req.ip,
+      });
+    }
     return {
       ok: true,
       workerIndex: idx,
-      label: stored,
+      label,
       workers: labelsStore.getWorkers(),
     };
   } catch (e) {

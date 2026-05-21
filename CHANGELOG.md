@@ -31,7 +31,16 @@ Inline rename for worker/session rows (ccx peer-reviewed: spec v2 + implementati
 - `focusActivePane` bails out when `state.editing` is active so iPad iOS IME redirect doesn't steal focus.
 
 ### Tests
-- `server/labels.test.js` — 14 `node:test` cases: validateLabel (7) + store roundtrip, recovery from `.bak`, both-corrupted preservation, prototype-pollution defense, concurrent write serialization (7).
+- `server/labels.test.js` — 18 `node:test` cases: validateLabel (7) + store roundtrip, recovery from `.bak`, both-corrupted preservation, prototype-pollution defense, concurrent serialization, idempotent return shape, concurrent same-key dedupe, schema-version mismatch fallback, missing-main-with-bak recovery.
+
+### Review
+Codex peer-reviewed the implementation diff. Addressed RED + key YELLOW findings inline before merge:
+- **RED — labels.js load**: main-missing-but-bak-present case now triggers recovery (previously fell through to "fresh dir" and lost the bak).
+- **RED — labels.js schema**: schema validation (`version === 1`, `workers` plain object) gates the main-vs-bak decision. Schema-invalid main now falls back to bak.
+- **RED — index.js idempotency**: idempotency check moved inside the labels.js write queue so concurrent identical PUTs cannot both write/audit.
+- **YELLOW — rename prefill**: worker rename now prefills with the default name (`worker-N`) instead of empty; hitting Enter unchanged is treated as "clear", not "save default as custom label".
+- **YELLOW — double commit**: `commitRename` carries an in-flight guard so Enter-then-blur cannot trigger a duplicate PUT.
+- **YELLOW — session empty**: empty session rename now surfaces an explicit toast instead of silently cancelling.
 
 ### Spec
 - `docs/superpowers/specs/2026-05-20-tabterm-rename-design.md` (v2, Codex peer-reviewed)
