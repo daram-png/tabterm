@@ -110,6 +110,8 @@ const state = {
   preflightIssues: [],
   hydra: { enabled: true, ready: false },
   split: null,
+  workerLabels: {},      // { "0": "pixiechess", ... } — from preflight + PUT responses
+  editing: null,         // { kind, key, originalValue, defaultName, inputEl, wrapEl, rowEl, cancelled }
 };
 
 /* ---------- helpers ---------- */
@@ -126,6 +128,14 @@ function slotOfPane(id) {
   if (state.slots[0] === id) return 0;
   if (state.slots[1] === id) return 1;
   return -1;
+}
+function displayName(p) {
+  if (!p) return '';
+  if (p.kind === 'worker') {
+    const custom = state.workerLabels[p.workerIndex];
+    return custom || p.label;
+  }
+  return p.label;
 }
 
 /* ---------- slot routing ---------- */
@@ -248,7 +258,7 @@ function renderSlotStrip() {
     const p = pid ? paneById(pid) : null;
     chip.classList.toggle('focused', i === state.activeSlot && !!pid);
     chip.classList.toggle('empty', !pid);
-    chip.querySelector('.slot-label').textContent = p ? p.label : 'empty';
+    chip.querySelector('.slot-label').textContent = p ? displayName(p) : 'empty';
     chip.onclick = pid ? () => { state.activeSlot = i; renderSidebar(); renderSlotStrip(); focusActivePane(paneById(pid)); } : null;
   }
 }
@@ -282,7 +292,7 @@ function paneHtml(p, slotLabel) {
     <div class="session-header">
       <div class="session-icon">${claudeMascotSvg(32)}</div>
       <div class="session-meta">
-        <div class="session-name">${escapeHtml(p.label)} <span class="ver">${slotLabel}</span></div>
+        <div class="session-name">${escapeHtml(displayName(p))} <span class="ver">${slotLabel}</span></div>
         <div class="session-sub">${p.kind === 'worker' ? 'ccx hybrid' : 'general session'}<span class="sep">·</span><span class="session-path">${escapeHtml(p.cwd || '')}</span></div>
       </div>
       <div class="session-tools">
@@ -378,7 +388,7 @@ function buildLayout() {
   renderSlotStrip();
   const activePane = paneById(state.slots[state.activeSlot]);
   focusActivePane(activePane);
-  $('#wc-title-text').textContent = activePane ? `tabterm — ${activePane.label}` : 'tabterm';
+  $('#wc-title-text').textContent = activePane ? `tabterm — ${displayName(activePane)}` : 'tabterm';
 }
 
 // On iOS we never want focus on xterm's helper textarea (broken IME path);
@@ -770,6 +780,10 @@ async function init() {
     if (state.hydra.enabled) {
       if (state.hydra.ready) toast('HydraTeams ready', 'ok', 3000);
       else toast('HydraTeams NOT ready — workers may fail', 'err', 0);
+    }
+    state.workerLabels = pre.workerLabels || {};
+    if (pre.labelsHealth && pre.labelsHealth !== 'ok') {
+      toast(`labels: ${pre.labelsHealth}`, pre.labelsHealth === 'corrupted_reset' ? 'err' : 'amber', 6000);
     }
   } catch (e) { console.error(e); }
 
