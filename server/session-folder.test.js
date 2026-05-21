@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, statSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -86,8 +86,9 @@ test('writeMeta: atomic write produces parseable JSON', async () => {
 });
 
 test('writeMeta: rejects non-existent dir', async () => {
+  const ghost = join(tmpdir(), `tabterm-nonexistent-${Date.now()}-${Math.random().toString(36).slice(2)}`, 'xyz');
   await assert.rejects(
-    writeMeta('/nonexistent/path/xyz', { label: '', createdAt: 1, lastUsedAt: 1 })
+    writeMeta(ghost, { label: '', createdAt: 1, lastUsedAt: 1 })
   );
 });
 
@@ -130,6 +131,17 @@ test('touchLastUsed: updates lastUsedAt without touching other fields', async ()
     assert.equal(meta.label, 'lbl');
     assert.equal(meta.createdAt, 100);
     assert.ok(meta.lastUsedAt > 200);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('writeMeta/readMeta: clampLabel strips control characters', async () => {
+  const dir = tmp();
+  try {
+    await writeMeta(dir, { label: 'hello\x00world\x07!', createdAt: 1, lastUsedAt: 2 });
+    const meta = await readMeta(dir);
+    assert.equal(meta.label, 'helloworld!');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

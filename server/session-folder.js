@@ -18,9 +18,10 @@ function parseSafe(text) {
   try { return JSON.parse(text); } catch { return null; }
 }
 
+const CONTROL_RE = /[\x00-\x1f\x7f]/g;
 function clampLabel(v) {
   if (typeof v !== 'string') return '';
-  const t = v.trim();
+  const t = v.trim().replace(CONTROL_RE, '');
   if (t.length > 32) return t.slice(0, 32);
   return t;
 }
