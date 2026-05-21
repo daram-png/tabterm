@@ -112,6 +112,9 @@ const state = {
   split: null,
   workerLabels: {},      // { "0": "pixiechess", ... } — from preflight + PUT responses
   editing: null,         // { kind, key, originalValue, defaultName, inputEl, wrapEl, rowEl, cancelled }
+  folders: [],           // GET /api/sessions/folders 결과 (디스크 enumerate)
+  foldersLoadedAt: 0,
+  kebabMenu: null,
 };
 
 /* ---------- helpers ---------- */
@@ -211,6 +214,24 @@ async function commitRename() {
         body: JSON.stringify({ name }),
       });
       state.workerLabels = r.workers || {};
+    } else if (ed.kind === 'session-folder') {
+      if (name.trim() === '') {
+        toast('rename: empty label not allowed for session folders', 'err');
+        input.disabled = false;
+        ed.wrapEl.style.opacity = '';
+        ed.committing = false;
+        input.focus();
+        input.select();
+        return;
+      }
+      await api(`/api/sessions/folders/${encodeURIComponent(ed.key)}/label`, {
+        method: 'PUT',
+        body: JSON.stringify({ name }),
+      });
+      // Sync folder label into local state so sidebar reflects change immediately,
+      // then refreshAll to pull authoritative server state.
+      const folder = (state.folders || []).find((f) => f.name === ed.key);
+      if (folder) folder.label = name;
     } else {
       if (name.trim() === '') {
         // Sessions don't support clearing → surface to the user instead of silent cancel.
@@ -243,6 +264,8 @@ async function commitRename() {
         nameSpan.innerHTML = `${escapeHtml(displayName(p))} <span class="ver">${escapeHtml(slotLabel)}</span>`;
       }
     }
+    // session-folder: pull authoritative state from server (label persisted to tabterm.json)
+    if (ed.kind === 'session-folder') refreshAll();
   } catch (e) {
     const msg = e?.body?.reason || e?.body?.error || e?.message || 'rename failed';
     toast(`rename: ${msg}`, 'err');
@@ -288,14 +311,26 @@ function renderSidebar() {
   const list = $('#sidebar-list');
   list.innerHTML = '';
 
-  // dynamic sessions (kind=session)
-  const sessions = state.panes.filter((p) => p.kind === 'session');
-  if (sessions.length) {
+  // dynamic sessions: 디스크 폴더 source + alive PTY join
+  const sessionPanes = state.panes.filter((p) => p.kind === 'session');
+  const paneByCwd = new Map();
+  for (const p of sessionPanes) paneByCwd.set(p.cwd, p);
+
+  const folderRows = (state.folders || [])
+    .map((f) => ({
+      folder: f,
+      pane: paneByCwd.get(f.cwd) || null,
+    }))
+    .sort((a, b) => (b.folder.lastUsedAt || 0) - (a.folder.lastUsedAt || 0));
+
+  if (folderRows.length) {
     const h = document.createElement('div');
     h.className = 'ws-section';
     h.textContent = 'sessions';
     list.appendChild(h);
-    for (const p of sessions) list.appendChild(renderRow(p, 'session'));
+    for (const { folder, pane } of folderRows) {
+      list.appendChild(renderSessionFolderRow(folder, pane));
+    }
   }
 
   // header for workers
@@ -332,40 +367,186 @@ function renderSidebar() {
   }
 }
 
-function renderRow(p, kindLabel) {
+function renderSessionFolderRow(folder, pane) {
   const el = document.createElement('div');
-  const slot = slotOfPane(p.id);
+  const slot = pane ? slotOfPane(pane.id) : -1;
   const isActive = slot >= 0 && slot === state.activeSlot;
   el.className = 'ws' + (isActive ? ' active' : '');
-  el.dataset.paneId = p.id;
-  el.dataset.kind = 'session';
+  el.dataset.folderName = folder.name;
+  el.dataset.kind = 'session-folder';
+  if (pane) el.dataset.paneId = pane.id;
 
-  let glyph, gkind;
-  if (p.dead) { glyph = '✗'; gkind = 'dead'; }
-  else if (p.kind === 'session') { glyph = '◆'; gkind = 'session'; }
-  else { glyph = '●'; gkind = 'run'; }
+  let glyph, gkind, metaText;
+  if (!pane) { glyph = '◇'; gkind = 'idle'; metaText = 'no PTY'; }
+  else if (pane.dead) { glyph = '✗'; gkind = 'dead'; metaText = `exit ${pane.exitCode ?? '?'}`; }
+  else { glyph = '◆'; gkind = 'session'; metaText = slot >= 0 ? (slot === 0 ? 'in slot L' : 'in slot R') : 'detached'; }
 
-  const meta = p.dead ? `exit ${p.exitCode ?? '?'}` : (slot >= 0 ? (slot === 0 ? 'in slot L' : 'in slot R') : 'detached');
   const slotTag = slot >= 0 ? `<span class="ws-slot-tag">${slot === 0 ? 'L' : 'R'}</span>` : '';
-  const name = displayName(p);
+  const name = folder.label || folder.name;
+  const ageText = relativeTime(folder.lastUsedAt);
+  const agePart = ageText ? ' · ' + escapeHtml(ageText) : '';
 
   el.innerHTML = `
     <span class="ws-glyph ${gkind}">${glyph}</span>
     ${slotTag}
-    <span class="ws-rename-btn" data-act="rename" data-kind="session" data-key="${escapeHtml(p.id)}" title="Rename">${pencilSvg()}</span>
+    <span class="ws-rename-btn" data-act="rename" data-kind="session-folder" data-key="${escapeHtml(folder.name)}" title="Rename">${pencilSvg()}</span>
+    <span class="ws-kebab-btn" data-act="kebab" data-key="${escapeHtml(folder.name)}" title="Actions">⋮</span>
     <div class="ws-name">${escapeHtml(name)}</div>
-    <div class="ws-meta">${escapeHtml(meta)}</div>
-    <div class="ws-path">${escapeHtml(p.cwd || '')}</div>
+    <div class="ws-meta">${escapeHtml(metaText)}${folder.label ? ' · ' + escapeHtml(folder.name) : ''}${agePart}</div>
+    <div class="ws-path">${escapeHtml(folder.cwd)}</div>
   `;
-  el.addEventListener('click', (e) => {
-    if (e.target.closest('.ws-rename-btn') || e.target.closest('.ws-rename-input')) return;
-    assignToSlot(p.id);
+
+  el.addEventListener('click', async (e) => {
+    if (e.target.closest('.ws-rename-btn') || e.target.closest('.ws-kebab-btn') || e.target.closest('.ws-rename-input')) return;
+    if (pane && !pane.dead) {
+      assignToSlot(pane.id);
+    } else {
+      // dead 폴더 클릭 → 새 PTY spawn (Task 8 에서 실구현)
+      await spawnSessionToFolder(folder.cwd);
+    }
   });
   el.querySelector('.ws-rename-btn').addEventListener('click', (e) => {
     e.stopPropagation();
-    startRename(el, 'session', p.id, p.label, p.label);
+    startRename(el, 'session-folder', folder.name, folder.label, folder.name);
+  });
+  el.querySelector('.ws-kebab-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    openKebabMenu(folder, pane, el);
   });
   return el;
+}
+
+function relativeTime(ms) {
+  if (!ms) return '';
+  const diff = Date.now() - ms;
+  if (diff < 60_000) return 'just now';
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  return `${Math.floor(diff / 86_400_000)}d ago`;
+}
+
+async function spawnSessionToFolder(cwd) {
+  try {
+    const r = await fetch('/api/sessions', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        ...csrfHeader(),
+      },
+      body: JSON.stringify({ kind: 'session', cwd, cols: 120, rows: 32 }),
+    });
+    if (r.status === 409) {
+      const data = await r.json();
+      const ok = window.confirm(`이 폴더에 다른 세션이 살아있습니다. 종료하고 새로 시작할까요?\n(${data.existing?.length || 0}개)`);
+      if (!ok) return;
+      const r2 = await fetch('/api/sessions', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          ...csrfHeader(),
+        },
+        body: JSON.stringify({ kind: 'session', cwd, cols: 120, rows: 32, force: true }),
+      });
+      if (!r2.ok) throw new Error(`spawn force failed ${r2.status}`);
+    } else if (!r.ok) {
+      throw new Error(`spawn failed ${r.status}`);
+    }
+    await refreshAll();
+  } catch (e) {
+    console.error('[spawn] folder attach failed', e);
+    alert(`세션 spawn 실패: ${e.message}`);
+  }
+}
+
+function openKebabMenu(folder, pane, anchorEl) {
+  closeKebabMenu();
+  const menu = document.createElement('div');
+  menu.className = 'ws-kebab-menu';
+  const rect = anchorEl.getBoundingClientRect();
+  menu.style.top = `${rect.bottom + 2}px`;
+  menu.style.left = `${rect.right - 120}px`;
+
+  const killBtn = document.createElement('button');
+  killBtn.className = 'ws-kebab-item';
+  killBtn.textContent = 'Kill PTY';
+  killBtn.disabled = !pane || pane.dead;
+  killBtn.addEventListener('click', async () => {
+    closeKebabMenu();
+    if (!confirm('이 세션 PTY 를 종료할까요? 폴더와 라벨은 유지됩니다.')) return;
+    await killSessionFolder(pane.id);
+  });
+
+  const delBtn = document.createElement('button');
+  delBtn.className = 'ws-kebab-item danger';
+  delBtn.textContent = 'Delete folder…';
+  delBtn.addEventListener('click', async () => {
+    closeKebabMenu();
+    await deleteSessionFolder(folder);
+  });
+
+  menu.appendChild(killBtn);
+  menu.appendChild(delBtn);
+  document.body.appendChild(menu);
+  state.kebabMenu = menu;
+
+  setTimeout(() => {
+    document.addEventListener('click', closeKebabMenuOnce, { once: true, capture: true });
+  }, 0);
+}
+
+function closeKebabMenuOnce(e) {
+  if (state.kebabMenu && !state.kebabMenu.contains(e.target)) {
+    closeKebabMenu();
+  } else {
+    document.addEventListener('click', closeKebabMenuOnce, { once: true, capture: true });
+  }
+}
+
+function closeKebabMenu() {
+  if (state.kebabMenu) {
+    state.kebabMenu.remove();
+    state.kebabMenu = null;
+  }
+}
+
+async function killSessionFolder(paneId) {
+  try {
+    const r = await fetch(`/api/sessions/${paneId}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+      headers: csrfHeader(),
+    });
+    if (!r.ok) throw new Error(`kill failed ${r.status}`);
+    await refreshAll();
+  } catch (e) {
+    alert(`PTY kill 실패: ${e.message}`);
+  }
+}
+
+async function deleteSessionFolder(folder) {
+  const name = folder.label || folder.name;
+  if (!confirm(`"${name}" 폴더를 완전히 삭제합니다.\n복구 불가. 폴더 안 모든 파일이 사라집니다.\n계속할까요?`)) return;
+  const typed = window.prompt(`확인을 위해 폴더명을 정확히 입력하세요:\n${folder.name}`);
+  if (typed !== folder.name) {
+    alert('입력이 일치하지 않습니다. 삭제 취소.');
+    return;
+  }
+  try {
+    const r = await fetch(`/api/sessions/folders/${encodeURIComponent(folder.name)}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+      headers: csrfHeader(),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.error || `delete failed ${r.status}`);
+    }
+    await refreshAll();
+  } catch (e) {
+    alert(`폴더 삭제 실패: ${e.message}`);
+  }
 }
 
 function renderWorkerRow(i, p) {
@@ -943,6 +1124,37 @@ function initImeBar() {
   });
 }
 
+/* ---------- folders fetch ---------- */
+async function fetchFolders() {
+  try {
+    const r = await fetch('/api/sessions/folders', { credentials: 'same-origin' });
+    if (!r.ok) throw new Error(`folders fetch ${r.status}`);
+    const j = await r.json();
+    state.folders = j.folders || [];
+    state.foldersLoadedAt = Date.now();
+  } catch (e) {
+    console.warn('[folders] fetch failed', e);
+  }
+}
+
+async function refreshAll() {
+  // Fetch live sessions and disk folders in parallel, then re-render sidebar.
+  // Sessions are fetched inline in init(); this helper is for subsequent refreshes
+  // triggered by folder mutations (POST/PUT/DELETE folder) in Tasks 7-9.
+  await Promise.all([
+    (async () => {
+      try {
+        const cur = await api('/api/sessions');
+        for (const s of (cur.sessions || [])) {
+          if (!paneById(s.id)) addPaneFromServer(s);
+        }
+      } catch (e) { console.warn('[refreshAll] sessions fetch failed', e); }
+    })(),
+    fetchFolders(),
+  ]);
+  renderSidebar();
+}
+
 /* ---------- init ---------- */
 async function init() {
   try {
@@ -962,16 +1174,21 @@ async function init() {
     }
   } catch (e) { console.error(e); }
 
-  try {
-    const cur = await api('/api/sessions');
-    if (cur.sessions?.length) {
-      for (const s of cur.sessions) addPaneFromServer(s);
-      // restore first up to 2 into slots
-      const live = state.panes.slice(0, 2);
-      if (live[0]) { state.slots[0] = live[0].id; state.activeSlot = 0; state.slotCursor = 1; }
-      if (live[1]) { state.slots[1] = live[1].id; state.slotCursor = 0; }
-    }
-  } catch (e) { console.error(e); }
+  await Promise.all([
+    (async () => {
+      try {
+        const cur = await api('/api/sessions');
+        if (cur.sessions?.length) {
+          for (const s of cur.sessions) addPaneFromServer(s);
+          // restore first up to 2 into slots
+          const live = state.panes.slice(0, 2);
+          if (live[0]) { state.slots[0] = live[0].id; state.activeSlot = 0; state.slotCursor = 1; }
+          if (live[1]) { state.slots[1] = live[1].id; state.slotCursor = 0; }
+        }
+      } catch (e) { console.error(e); }
+    })(),
+    fetchFolders(),
+  ]);
 
   buildLayout();
   renderSidebar();

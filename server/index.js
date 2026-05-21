@@ -9,7 +9,7 @@ import { resolve, dirname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
 
 import { auth } from './auth.js';
 import { sessions } from './sessions.js';
@@ -17,6 +17,13 @@ import { registerWs } from './ws.js';
 import { audit } from './audit.js';
 import { ensureHydraReady, hydraStatus } from './hydra.js';
 import { loadWorkerEnv, buildClaudeInvocation } from './config.js';
+import {
+  listSessionFolders,
+  validateSessionFolderName,
+  ensureMeta,
+  touchLastUsed,
+  setLabel as setFolderLabel,
+} from './session-folder.js';
 import { startWatchdog, stopWatchdog } from './watchdog.js';
 import { registerSystemRoutes } from './system.js';
 import { createLabelsStore, validateLabel } from './labels.js';
@@ -167,6 +174,20 @@ app.get('/api/sessions', async (req, reply) => {
   return { sessions: sessions.list() };
 });
 
+app.get('/api/sessions/folders', async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  try {
+    const folders = await listSessionFolders(WORKERS_ROOT, {
+      workerPrefix: WORKER_PREFIX,
+      sessionPrefix: NEW_SESSION_PREFIX,
+    });
+    return { folders };
+  } catch (e) {
+    app.log.error({ err: e?.message }, '[folders] enumerate failed');
+    return reply.code(500).send({ error: 'folders-enumerate-failed' });
+  }
+});
+
 app.get('/api/labels', async (req, reply) => {
   if (!requireAuth(req, reply)) return;
   return { version: 1, workers: labelsStore.getWorkers() };
@@ -236,6 +257,46 @@ app.put('/api/sessions/:id/label', {
   return { ok: true, id, label: summary.label, session: summary };
 });
 
+app.put('/api/sessions/folders/:name/label', {
+  config: { rateLimit: false },
+  bodyLimit: 1024,
+}, async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  if (!requireCsrf(req, reply)) return;
+  const v = validateSessionFolderName(req.params.name, {
+    workerPrefix: WORKER_PREFIX,
+    sessionPrefix: NEW_SESSION_PREFIX,
+  });
+  if (!v.ok) return reply.code(400).send({ error: 'bad-name', reason: v.error });
+  const labelV = validateLabel(req.body?.name);
+  if (!labelV.ok) return reply.code(422).send({ error: 'validation', field: 'name', reason: labelV.error });
+
+  const cwd = resolve(WORKERS_ROOT, v.value);
+  if (!existsSync(cwd)) return reply.code(404).send({ error: 'folder-not-found', cwd });
+
+  try {
+    await setFolderLabel(cwd, labelV.value);
+  } catch (e) {
+    app.log.error({ err: e?.message, cwd }, '[folder-label] persist failed');
+    audit.log({ event: 'session.folder.label.set.failed', cwd, err: String(e?.message || e), ip: req.ip });
+    return reply.code(500).send({ error: 'persist-failed' });
+  }
+
+  // 동일 cwd alive PTY 가 있으면 메모리 라벨 동기화
+  const matched = sessions.list().filter((s) => s.kind === 'session' && s.cwd === cwd && s.alive);
+  for (const s of matched) sessions.setLabel(s.id, labelV.value || v.value);
+
+  audit.log({
+    event: 'session.folder.label.set',
+    cwd,
+    length: labelV.value.length,
+    cleared: labelV.value === '',
+    matchedSessions: matched.length,
+    ip: req.ip,
+  });
+  return { ok: true, folder: { name: v.value, cwd, label: labelV.value } };
+});
+
 
 // Extracted so /api/system/boot-all can spawn workers without re-implementing
 // hydra preflight, env loading, audit logging, or args building. Returns
@@ -299,19 +360,81 @@ app.post('/api/sessions', async (req, reply) => {
     return { session: r.session, envSource: r.envSource, envWarnings: r.envWarnings };
   }
 
-  // general session — no ccx env, fresh dir under WORKERS_ROOT
+  // general session — no ccx env. 두 모드:
+  //   1) cwd 미지정 → 새 폴더 mkdir + tabterm.json 작성 (legacy POST 동작)
+  //   2) cwd 지정 → 기존 폴더에 attach (validate 후), tabterm.json touch
   const inv = buildClaudeInvocation();
-  const ts = new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14);
-  const rand = randomBytes(2).toString('hex');
-  const name = `${NEW_SESSION_PREFIX}${ts}-${rand}`;
-  const cwd = resolve(WORKERS_ROOT, name);
-  try {
-    await mkdir(cwd, { recursive: true });
-  } catch (e) {
-    return reply.code(500).send({ error: 'mkdir-failed', message: String(e?.message || e) });
-  }
-  const sessionLabel = label || name;
   const claudeArgs = process.env.SESSION_CLAUDE_ARGS || '';
+
+  let cwd;
+  let folderName;
+  let createdNow = false;
+
+  if (req.body && typeof req.body.cwd === 'string') {
+    // Mode 2: attach to existing folder
+    const proposedPath = normalize(req.body.cwd);
+    folderName = proposedPath.split(/[\\/]+/).pop() || '';
+    const v = validateSessionFolderName(folderName, {
+      workerPrefix: WORKER_PREFIX,
+      sessionPrefix: NEW_SESSION_PREFIX,
+    });
+    if (!v.ok) return reply.code(400).send({ error: 'bad-cwd', reason: v.error });
+    cwd = resolve(WORKERS_ROOT, folderName);
+    // Defence in depth: even after basename validation, ensure the original
+    // proposedPath resolves to exactly the same absolute path as WORKERS_ROOT/folderName.
+    // Blocks traversal attempts like "C:/workspace/../foo/session-abc" where basename
+    // looks fine but the parent path escapes WORKERS_ROOT.
+    if (resolve(proposedPath) !== cwd) {
+      return reply.code(400).send({ error: 'bad-cwd', reason: 'not-in-workspace' });
+    }
+    if (!existsSync(cwd)) {
+      return reply.code(400).send({ error: 'bad-cwd', reason: 'missing', cwd });
+    }
+    // 동일 cwd alive PTY 검사
+    const existing = sessions.list().filter(
+      (s) => s.kind === 'session' && s.cwd === cwd && s.alive,
+    );
+    if (existing.length > 0 && !req.body.force) {
+      return reply.code(409).send({
+        error: 'session-folder-busy',
+        cwd,
+        existing: existing.map((s) => ({ id: s.id, createdAt: s.createdAt })),
+      });
+    }
+    if (req.body.force && existing.length > 0) {
+      for (const s of existing) {
+        sessions.kill(s.id);
+        audit.log({ event: 'session.folder.evict', id: s.id, cwd, ip: req.ip });
+      }
+    }
+  } else {
+    // Mode 1: 신규 폴더
+    const ts = new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14);
+    const rand = randomBytes(2).toString('hex');
+    folderName = `${NEW_SESSION_PREFIX}${ts}-${rand}`;
+    cwd = resolve(WORKERS_ROOT, folderName);
+    try {
+      await mkdir(cwd, { recursive: true });
+      createdNow = true;
+    } catch (e) {
+      return reply.code(500).send({ error: 'mkdir-failed', message: String(e?.message || e) });
+    }
+  }
+
+  // tabterm.json 자동 작성 (Mode 1) 또는 touch (Mode 2)
+  try {
+    if (createdNow) {
+      await ensureMeta(cwd, { label: typeof label === 'string' ? label : '' });
+    } else {
+      await touchLastUsed(cwd);
+    }
+  } catch (e) {
+    app.log.warn({ err: e?.message, cwd }, '[session] tabterm.json write failed');
+    audit.log({ event: 'session.folder.meta.write.failed', cwd, err: String(e?.message || e), ip: req.ip });
+    // 메타 실패는 PTY spawn 까지 막지 않음
+  }
+
+  const sessionLabel = label || folderName;
   try {
     const s = sessions.create({
       label: sessionLabel,
@@ -325,15 +448,13 @@ app.post('/api/sessions', async (req, reply) => {
       onExit: ({ id, exitCode }) => audit.log({ event: 'session.exit', id, exitCode, kind: 'session' }),
     });
     audit.log({
-      event: 'session.create',
+      event: createdNow ? 'session.folder.create' : 'session.folder.attach',
       id: s.id,
       cwd,
       kind: 'session',
-      envSource: 'none',
-      envWarnings: [],
       ip: req.ip,
     });
-    return { session: s.summary(), envSource: 'none', envWarnings: [] };
+    return { session: s.summary(), envSource: 'none', envWarnings: [], cwd, folderName };
   } catch (e) {
     app.log.error(e);
     return reply.code(500).send({ error: 'spawn-failed', message: String(e?.message || e) });
@@ -354,6 +475,51 @@ app.delete('/api/sessions/:id', async (req, reply) => {
   const ok = sessions.kill(req.params.id);
   audit.log({ event: 'session.delete', id: req.params.id, ok, ip: req.ip });
   return { ok };
+});
+
+app.delete('/api/sessions/folders/:name', async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  if (!requireCsrf(req, reply)) return;
+  const v = validateSessionFolderName(req.params.name, {
+    workerPrefix: WORKER_PREFIX,
+    sessionPrefix: NEW_SESSION_PREFIX,
+  });
+  if (v.error === 'worker-protected') {
+    return reply.code(403).send({ error: 'worker-folder-protected' });
+  }
+  if (!v.ok) return reply.code(400).send({ error: 'bad-name', reason: v.error });
+
+  const cwd = resolve(WORKERS_ROOT, v.value);
+  // Defence in depth: ensure cwd is exactly a direct child of WORKERS_ROOT
+  // (validateSessionFolderName already rejects path separators, but containment
+  // check protects against future validate changes or env-dependent path normalization)
+  const root = resolve(WORKERS_ROOT);
+  const sep = cwd.includes('\\') ? '\\' : '/';
+  if (!cwd.startsWith(root + sep)) {
+    return reply.code(400).send({ error: 'bad-path' });
+  }
+  if (!existsSync(cwd)) return reply.code(404).send({ error: 'folder-not-found' });
+
+  // 1) alive PTY kill (동일 cwd 의 session kind)
+  const matched = sessions.list().filter((s) => s.kind === 'session' && s.cwd === cwd && s.alive);
+  for (const s of matched) sessions.kill(s.id);
+
+  // 2) 폴더 자체 rm -rf
+  try {
+    await rm(cwd, { recursive: true, force: true });
+  } catch (e) {
+    app.log.error({ err: e?.message, cwd }, '[folder-delete] rm failed');
+    audit.log({ event: 'session.folder.delete.failed', cwd, err: String(e?.message || e), ip: req.ip });
+    return reply.code(500).send({ error: 'rm-failed', message: String(e?.message || e) });
+  }
+
+  audit.log({
+    event: 'session.folder.delete',
+    cwd,
+    killedSessions: matched.length,
+    ip: req.ip,
+  });
+  return { ok: true, deleted: v.value };
 });
 
 await app.register(fastifyStatic, {

@@ -1,6 +1,6 @@
 {
   "name": "tabterm",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "description": "Windows-native browser PTY multiplexer (tabs/splits/reattach/PWA) for headless servers",

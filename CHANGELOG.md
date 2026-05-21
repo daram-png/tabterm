@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.6.0 — 2026-05-21
+
+### Added
+- `kind=session` 폴더를 영속 entity 로 승격
+  - 각 폴더에 `tabterm.json` (label, createdAt, lastUsedAt, version) 영속
+  - `GET /api/sessions/folders` — 디스크 폴더 enumerate
+  - `POST /api/sessions { cwd }` — 기존 폴더에 attach (force 옵션 지원)
+  - `PUT /api/sessions/folders/:name/label` — 라벨 영속 변경
+  - `DELETE /api/sessions/folders/:name` — 폴더 자체 rm -rf
+- 사이드바 sessions 섹션이 디스크 폴더 기반으로 렌더
+  - lastUsedAt 내림차순 정렬
+  - alive PTY 유무에 따라 ◆/◇/✗ glyph
+  - 케밥(⋮) 메뉴: Kill PTY / Delete folder
+- 폴더 라벨 인라인 편집 (워커 라벨 UX 와 동일 패턴, PUT folder API 사용)
+- Legacy 폴더(`tabterm.json` 없는 session-*) 자동 인식 + 첫 라벨 편집/spawn 시 lazy migration
+
+### Security
+- `DELETE /api/sessions/folders/:name`:
+  - path traversal 거부 (separator, `..`, control chars)
+  - `worker-` prefix 폴더 403 보호
+  - WORKERS_ROOT 하위 1단계만 허용 (containment check)
+- `validateSessionFolderName` 에 control char 거부 (null byte, etc) 추가
+
+### Audit events
+- `session.folder.create` (이전 `session.create` 가 session 분기에서 변경됨)
+- `session.folder.attach`
+- `session.folder.evict`
+- `session.folder.label.set` / `session.folder.label.set.failed`
+- `session.folder.delete` / `session.folder.delete.failed`
+- `session.folder.meta.write.failed`
+
+### Internal
+- 신규 모듈 `server/session-folder.js` — tabterm.json read/write/validate
+- 신규 테스트 `server/session-folder.test.js` (10 tests), `server/folders-api.test.js` (9 tests)
+- 사용 안 하는 `renderRow` 함수 제거 (사이드바가 `renderSessionFolderRow` / `renderWorkerRow` 만 사용)
+
+### Tests
+- 19 unit tests total (helper + validate + enumerate), all passing on Node 22
+
+
 ## 0.5.3 — 2026-05-20
 
 Inline rename for worker/session rows (ccx peer-reviewed: spec v2 + implementation diff).

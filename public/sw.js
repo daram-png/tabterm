@@ -1,4 +1,4 @@
-const VERSION = 'tabterm-v10-rename-labels';
+const VERSION = 'tabterm-v11-session-folders';
 const SHELL = [
   '/',
   '/index.html',
