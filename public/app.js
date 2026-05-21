@@ -192,6 +192,7 @@ function renderRow(p, kindLabel) {
   const isActive = slot >= 0 && slot === state.activeSlot;
   el.className = 'ws' + (isActive ? ' active' : '');
   el.dataset.paneId = p.id;
+  el.dataset.kind = 'session';
 
   let glyph, gkind;
   if (p.dead) { glyph = '✗'; gkind = 'dead'; }
@@ -200,15 +201,24 @@ function renderRow(p, kindLabel) {
 
   const meta = p.dead ? `exit ${p.exitCode ?? '?'}` : (slot >= 0 ? (slot === 0 ? 'in slot L' : 'in slot R') : 'detached');
   const slotTag = slot >= 0 ? `<span class="ws-slot-tag">${slot === 0 ? 'L' : 'R'}</span>` : '';
+  const name = displayName(p);
 
   el.innerHTML = `
     <span class="ws-glyph ${gkind}">${glyph}</span>
     ${slotTag}
-    <div class="ws-name">${escapeHtml(p.label)}</div>
+    <span class="ws-rename-btn" data-act="rename" data-kind="session" data-key="${escapeHtml(p.id)}" title="Rename">${pencilSvg()}</span>
+    <div class="ws-name">${escapeHtml(name)}</div>
     <div class="ws-meta">${escapeHtml(meta)}</div>
     <div class="ws-path">${escapeHtml(p.cwd || '')}</div>
   `;
-  el.addEventListener('click', () => assignToSlot(p.id));
+  el.addEventListener('click', (e) => {
+    if (e.target.closest('.ws-rename-btn') || e.target.closest('.ws-rename-input')) return;
+    assignToSlot(p.id);
+  });
+  el.querySelector('.ws-rename-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    startRename(el, 'session', p.id, p.label, p.label);
+  });
   return el;
 }
 
@@ -218,6 +228,7 @@ function renderWorkerRow(i, p) {
   const isActive = slot >= 0 && slot === state.activeSlot;
   el.className = 'ws' + (isActive ? ' active' : '');
   el.dataset.workerIndex = String(i);
+  el.dataset.kind = 'worker';
 
   const dirMissing = state.preflightIssues.some((s) => s.includes(`${state.workerPrefix}${i}`));
   let glyph = '*', gkind = 'idle', meta = 'idle';
@@ -229,14 +240,21 @@ function renderWorkerRow(i, p) {
   }
   const slotTag = (p && slot >= 0) ? `<span class="ws-slot-tag">${slot === 0 ? 'L' : 'R'}</span>` : '';
 
+  const defaultName = state.workerPrefix + i;
+  const customLabel = state.workerLabels[i];
+  const name = customLabel || defaultName;
+  const metaText = customLabel ? `${meta} · ${defaultName}` : meta;
+
   el.innerHTML = `
     <span class="ws-glyph ${gkind}">${glyph}</span>
     ${slotTag}
-    <div class="ws-name">${escapeHtml(state.workerPrefix + i)}</div>
-    <div class="ws-meta">${escapeHtml(meta)}</div>
-    <div class="ws-path">${escapeHtml(state.workersRoot + '/' + state.workerPrefix + i)}</div>
+    <span class="ws-rename-btn" data-act="rename" data-kind="worker" data-key="${i}" title="Rename">${pencilSvg()}</span>
+    <div class="ws-name">${escapeHtml(name)}</div>
+    <div class="ws-meta">${escapeHtml(metaText)}</div>
+    <div class="ws-path">${escapeHtml(state.workersRoot + '/' + defaultName)}</div>
   `;
-  el.addEventListener('click', async () => {
+  el.addEventListener('click', async (e) => {
+    if (e.target.closest('.ws-rename-btn') || e.target.closest('.ws-rename-input')) return;
     if (p) { assignToSlot(p.id); return; }
     try {
       const r = await api('/api/sessions', {
@@ -246,6 +264,10 @@ function renderWorkerRow(i, p) {
       addPaneFromServer(r.session);
       assignToSlot(r.session.id);
     } catch (err) { toast(`spawn failed: ${err.message || err}`, 'err'); }
+  });
+  el.querySelector('.ws-rename-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    startRename(el, 'worker', i, customLabel || '', defaultName);
   });
   return el;
 }
@@ -311,6 +333,10 @@ function paneHtml(p, slotLabel) {
       <span class="sb-right"><span class="dot ${p.dead ? 'dead' : ''}"></span>${p.dead ? `exit ${p.exitCode ?? '?'}` : 'attached'}</span>
     </div>
   `;
+}
+
+function pencilSvg() {
+  return `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 2.5 L13.5 4.5 L5 13 L2.5 13.5 L3 11 Z"/><path d="M10 4 L12 6"/></svg>`;
 }
 
 function claudeMascotSvg(size) {
