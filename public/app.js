@@ -425,6 +425,34 @@ function relativeTime(ms) {
   return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
+// POST /api/sessions, transparently handling 409 worker-session-exists.
+// On 409 the user sees a confirm explaining that the telegram bot pairing
+// will move to the new tab, and on accept we retry with force=true so the
+// server evicts the old worker session + taskkill /F /T the stale bot.pid
+// tree before spawning. Used by sidebar worker click and restartPane.
+async function postNewSessionWithForceConfirm(body) {
+  try {
+    return await api('/api/sessions', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    if (e?.body?.error !== 'worker-session-exists') throw e;
+    const count = e.body.existingCount || 0;
+    const wIdx = e.body.workerIndex;
+    const ok = window.confirm(
+      `worker-${wIdx} 에 다른 세션이 ${count}개 살아있습니다.\n` +
+      `텔레그램 봇 짝을 이 탭으로 옮기려면 기존 세션을 강제 종료해야 합니다.\n\n` +
+      `종료하고 새로 시작할까요?`,
+    );
+    if (!ok) throw e;
+    return await api('/api/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ ...body, force: true }),
+    });
+  }
+}
+
 async function spawnSessionToFolder(cwd) {
   try {
     const r = await fetch('/api/sessions', {
@@ -584,13 +612,15 @@ function renderWorkerRow(i, p) {
     if (e.target.closest('.ws-rename-btn') || e.target.closest('.ws-rename-input')) return;
     if (p) { assignToSlot(p.id); return; }
     try {
-      const r = await api('/api/sessions', {
-        method: 'POST',
-        body: JSON.stringify({ kind: 'worker', workerIndex: i, cols: 120, rows: 32 }),
+      const r = await postNewSessionWithForceConfirm({
+        kind: 'worker', workerIndex: i, cols: 120, rows: 32,
       });
       addPaneFromServer(r.session);
       assignToSlot(r.session.id);
-    } catch (err) { toast(`spawn failed: ${err.message || err}`, 'err'); }
+    } catch (err) {
+      if (err?.body?.error === 'worker-session-exists') return; // user declined confirm
+      toast(`spawn failed: ${err.message || err}`, 'err');
+    }
   });
   el.querySelector('.ws-rename-btn').addEventListener('click', (e) => {
     e.stopPropagation();
@@ -848,10 +878,19 @@ async function restartPane(id) {
     const body = kind === 'worker'
       ? { kind: 'worker', workerIndex: idx, cols: 120, rows: 32 }
       : { kind: 'session', cols: 120, rows: 32 };
-    const r = await api('/api/sessions', { method: 'POST', body: JSON.stringify(body) });
+    // closePane awaits the DELETE which now awaits PTY exit (v0.6.1), so by
+    // the time we POST the old session should be gone. But a stale orphan
+    // worker from a previous tabterm crash can still trigger 409, hence the
+    // force-confirm wrapper.
+    const r = kind === 'worker'
+      ? await postNewSessionWithForceConfirm(body)
+      : await api('/api/sessions', { method: 'POST', body: JSON.stringify(body) });
     addPaneFromServer(r.session);
     assignToSlot(r.session.id);
-  } catch (err) { toast(`restart failed: ${err.message || err}`, 'err'); }
+  } catch (err) {
+    if (err?.body?.error === 'worker-session-exists') return; // user declined confirm
+    toast(`restart failed: ${err.message || err}`, 'err');
+  }
 }
 
 /* ---------- new session ---------- */

@@ -17,6 +17,7 @@ import { registerWs } from './ws.js';
 import { audit } from './audit.js';
 import { ensureHydraReady, hydraStatus } from './hydra.js';
 import { loadWorkerEnv, buildClaudeInvocation } from './config.js';
+import { killStaleBot } from './kill-stale-bot.js';
 import {
   listSessionFolders,
   validateSessionFolderName,
@@ -321,7 +322,7 @@ app.put('/api/sessions/folders/:name/label', {
 // Extracted so /api/system/boot-all can spawn workers without re-implementing
 // hydra preflight, env loading, audit logging, or args building. Returns
 // { ok, session, envSource, envWarnings } on success or { ok: false, error: { code, body } }.
-async function spawnWorkerSession({ workerIndex, label, cols, rows, ip }) {
+async function spawnWorkerSession({ workerIndex, label, cols, rows, ip, force = false }) {
   if (!Number.isInteger(workerIndex) || workerIndex < 0 || workerIndex >= WORKERS_COUNT) {
     return { ok: false, error: { code: 400, body: { error: 'workerIndex out of range' } } };
   }
@@ -329,6 +330,33 @@ async function spawnWorkerSession({ workerIndex, label, cols, rows, ip }) {
   if (!existsSync(cwd)) {
     return { ok: false, error: { code: 400, body: { error: 'cwd missing', cwd } } };
   }
+
+  // Paired-session guard: telegram bot only pairs with the most recent
+  // claude.exe under STATE_DIR. Spawning a second worker-N strands the
+  // older tab's bot link. Block on conflict; require explicit force=true
+  // to evict.
+  const existingSessions = sessions
+    .list()
+    .filter((s) => s.kind === 'worker' && s.workerIndex === workerIndex && s.alive);
+  if (existingSessions.length > 0 && !force) {
+    return {
+      ok: false,
+      error: {
+        code: 409,
+        body: {
+          error: 'worker-session-exists',
+          workerIndex,
+          existingCount: existingSessions.length,
+          existing: existingSessions.map((s) => ({
+            id: s.id,
+            label: s.label,
+            createdAt: s.createdAt,
+          })),
+        },
+      },
+    };
+  }
+
   if (HYDRA_ENABLED) {
     const r = await ensureHydraReady();
     if (!r.ready) {
@@ -340,6 +368,20 @@ async function spawnWorkerSession({ workerIndex, label, cols, rows, ip }) {
   const wEnv = await loadWorkerEnv(cwd);
   const extraEnv = { ANTHROPIC_BASE_URL, ...wEnv.env };
   const sessionLabel = label || `${WORKER_PREFIX}${workerIndex}`;
+
+  // Evict path (force only): await sessions.kill so the PTY's onExit fires
+  // before we spawn the replacement — otherwise the new bot races the old
+  // one for the telegram poller. Then taskkill /F /T the bot.pid tree to
+  // handle orphan bots whose parent CLI lives outside tabterm.
+  if (force && existingSessions.length > 0) {
+    await Promise.all(existingSessions.map(async (s) => {
+      await sessions.kill(s.id);
+      audit.log({ event: 'session.evict', id: s.id, workerIndex, ip });
+    }));
+    const botResult = await killStaleBot(wEnv.env.TELEGRAM_STATE_DIR);
+    audit.log({ event: 'bot.evict', workerIndex, ...botResult, ip });
+  }
+
   try {
     const s = sessions.create({
       label: sessionLabel,
@@ -371,11 +413,14 @@ async function spawnWorkerSession({ workerIndex, label, cols, rows, ip }) {
 app.post('/api/sessions', async (req, reply) => {
   if (!requireAuth(req, reply)) return;
   if (!requireCsrf(req, reply)) return;
-  const { label, kind, workerIndex, cols, rows } = req.body || {};
+  const { label, kind, workerIndex, cols, rows, force } = req.body || {};
   const sessionKind = kind === 'session' ? 'session' : 'worker';
 
   if (sessionKind === 'worker') {
-    const r = await spawnWorkerSession({ workerIndex, label, cols, rows, ip: req.ip });
+    const r = await spawnWorkerSession({
+      workerIndex, label, cols, rows, ip: req.ip,
+      force: force === true,
+    });
     if (!r.ok) return reply.code(r.error.code).send(r.error.body);
     return { session: r.session, envSource: r.envSource, envWarnings: r.envWarnings };
   }

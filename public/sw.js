@@ -1,4 +1,4 @@
-const VERSION = 'tabterm-v13-watchdog-stop-tree-kill';
+const VERSION = 'tabterm-v14-worker-session-force-confirm';
 const SHELL = [
   '/',
   '/index.html',
