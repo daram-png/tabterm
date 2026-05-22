@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.6.3 — 2026-05-22
+
+### Added
+- 워커 세션 force-confirm spawn — telegram bot pairing 보호
+  - 원인: 같은 worker-N 을 두 번 spawn 하면 텔레그램 봇이 `bot.pid` 의 stale poller 를 `SIGTERM` 으로 죽이려 함. Windows ConPTY 한계로 시그널 전달 불완전 → 기존 봇 생존, 새 봇이 getUpdates 409 conflict 로 자살. 결과적으로 텔레그램 메시지가 orphan claude.exe 로 감 (사용자가 보지 못하는 탭)
+  - 서버:
+    - `spawnWorkerSession({ force })` — 동일 `workerIndex` alive session 있으면 **HTTP 409 `worker-session-exists`** 반환
+    - `force=true` 시 `await sessions.kill` (v0.6.1 async 적용) + `killStaleBot(STATE_DIR)` 으로 `taskkill /F /T` 트리 종료 후 spawn
+    - `audit` 이벤트: `session.evict`, `bot.evict`
+  - 클라이언트:
+    - `postNewSessionWithForceConfirm(body)` helper — 409 받으면 `confirm()` dialog 표시 → 사용자 OK 면 `{force: true}` 재시도
+    - 사이드바 워커 클릭 + `restartPane` 둘 다 helper 사용
+    - confirm 거절은 silent (toast 안 띄움)
+- `server/kill-stale-bot.js` (신규 46줄) — `STATE_DIR/bot.pid` 읽고 alive 면 `taskkill /F /T` (Windows) 또는 `SIGKILL` (POSIX). PID 0/1/음수 가드.
+
+### Tests
+- `server/kill-stale-bot.test.js` (신규 7 케이스) — no-state-dir / no-pid-file / non-numeric / pid 0,1,-5 / dead pid / trailing whitespace / never-throws
+- 전체 회귀 49/49 통과
+
 ## 0.6.2 — 2026-05-22
 
 ### Fixed
