@@ -154,6 +154,88 @@ html, body {
 }
 .ws-section-engine-claude { color: var(--amber); }
 .ws-section-engine-opencode { color: var(--accent); }
+
+.fx-modal {
+  position: fixed; inset: 0; z-index: 9000;
+  background: rgba(0,0,0,.55);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.fx-modal.hidden { display: none; }
+.fx-card {
+  width: min(1100px, 100%); height: min(720px, 100%);
+  background: #0c0c0c; border: 1px solid #2a2a2a; border-radius: 10px;
+  display: flex; flex-direction: column; overflow: hidden;
+  box-shadow: 0 14px 40px rgba(0,0,0,.6);
+}
+.fx-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px; border-bottom: 1px solid #1f1f1f;
+  font-size: 12px; color: var(--text);
+}
+.fx-head > span:first-child { font-weight: 600; }
+.fx-path {
+  flex: 1; min-width: 0; color: var(--muted); font-family: "Geist Mono", monospace; font-size: 11px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.fx-close {
+  cursor: pointer; padding: 4px 6px; border-radius: 4px;
+  color: var(--muted); display: inline-flex; align-items: center;
+}
+.fx-close:hover { color: var(--text); background: rgba(255,255,255,.06); }
+.fx-body {
+  flex: 1; min-height: 0;
+  display: grid; grid-template-columns: minmax(220px, 320px) 1fr; gap: 0;
+}
+.fx-tree {
+  overflow: auto; border-right: 1px solid #1f1f1f; padding: 6px 0;
+  font-size: 12px;
+}
+.fx-detail {
+  overflow: auto; padding: 8px 14px;
+  font-size: 12px;
+}
+.fx-row-wrap { display: block; }
+.fx-row {
+  width: 100%; text-align: left; background: transparent; border: 0;
+  padding: 4px 10px 4px calc(8px + 14px * var(--fx-depth, 0));
+  color: var(--text); cursor: pointer; font: inherit;
+  display: grid; grid-template-columns: 14px 1fr auto; gap: 6px; align-items: center;
+}
+.fx-row:hover { background: #131313; }
+.fx-row[data-active="true"] { background: #1d4ed8; color: #f1f5f9; }
+.fx-row:disabled { color: var(--muted); cursor: not-allowed; opacity: .55; }
+.fx-row-glyph { color: var(--muted); font-family: "Geist Mono", monospace; font-size: 10px; text-align: center; }
+.fx-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fx-row-badge {
+  font-family: "Geist Mono", monospace; font-size: 9.5px;
+  color: var(--muted); text-transform: uppercase;
+}
+.fx-row[data-active="true"] .fx-row-badge { color: #c7d6f5; }
+.fx-row[data-kind="directory"] { font-weight: 500; }
+.fx-children { display: block; }
+
+.fx-detail-head {
+  font-family: "Geist Mono", monospace; font-size: 11px; color: var(--muted);
+  margin-bottom: 8px; word-break: break-all;
+}
+.fx-text {
+  font-family: "Geist Mono", monospace; font-size: 12px;
+  white-space: pre-wrap; word-wrap: break-word;
+  color: var(--text); margin: 0;
+}
+.fx-preview-frame { display: flex; justify-content: center; min-height: 100%; }
+.fx-preview-frame img { max-width: 100%; max-height: 600px; object-fit: contain; }
+.fx-preview-frame iframe { width: 100%; height: 600px; border: 0; background: #fff; }
+.fx-empty, .fx-error { padding: 16px; color: var(--muted); font-size: 12px; text-align: center; }
+.fx-error { color: var(--amber); }
+
+@media (max-width: 640px) {
+  .fx-modal { padding: 0; }
+  .fx-card { border-radius: 0; height: 100%; }
+  .fx-body { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+  .fx-tree { border-right: 0; border-bottom: 1px solid #1f1f1f; }
+}
 .ws-slot-tag {
   position: absolute; right: 10px; top: 10px;
   font-family: "Geist Mono", monospace; font-size: 10px;

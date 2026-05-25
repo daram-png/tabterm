@@ -114,6 +114,23 @@
         </div>
       </div>
 
+      <!-- file explorer modal (Phase 1: read-only viewer) -->
+      <div id="fx-modal" class="fx-modal hidden" role="dialog" aria-modal="true" aria-labelledby="fx-title" hidden>
+        <div class="fx-card">
+          <div class="fx-head">
+            <span id="fx-title">Files</span>
+            <span id="fx-path" class="fx-path" title=""></span>
+            <span class="fx-close" id="fx-close" title="Close (Esc)">
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 3.5 L12.5 12.5 M12.5 3.5 L3.5 12.5"/></svg>
+            </span>
+          </div>
+          <div class="fx-body">
+            <div class="fx-tree" id="fx-tree" aria-label="File tree"></div>
+            <div class="fx-detail" id="fx-detail" aria-label="File detail"></div>
+          </div>
+        </div>
+      </div>
+
       <!-- toast -->
       <div id="toast" class="toast hidden">
         <span class="pulse" id="toast-pulse"></span>

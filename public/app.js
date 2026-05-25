@@ -547,6 +547,14 @@ function openKebabMenu(folder, pane, anchorEl) {
     await killSessionFolder(pane.id);
   });
 
+  const filesBtn = document.createElement('button');
+  filesBtn.className = 'ws-kebab-item';
+  filesBtn.textContent = 'Open files…';
+  filesBtn.addEventListener('click', () => {
+    closeKebabMenu();
+    openFileExplorer(folder);
+  });
+
   const delBtn = document.createElement('button');
   delBtn.className = 'ws-kebab-item danger';
   delBtn.textContent = 'Delete folder…';
@@ -556,6 +564,7 @@ function openKebabMenu(folder, pane, anchorEl) {
   });
 
   menu.appendChild(killBtn);
+  menu.appendChild(filesBtn);
   menu.appendChild(delBtn);
   document.body.appendChild(menu);
   state.kebabMenu = menu;
@@ -1342,6 +1351,267 @@ async function init() {
 
   // iOS IME rail (no-op on non-iPad)
   initImeBar();
+}
+
+/* ---------- file explorer (Phase 1: read-only viewer) ---------- */
+
+const fxState = {
+  open: false,
+  folderName: null,
+  rootPath: '',
+  currentPath: '',
+  entriesByPath: new Map(),
+  expanded: new Set(),
+  selected: null,
+  detail: { kind: 'empty' },
+  loading: false,
+  error: null,
+  previewUrl: null,
+};
+
+function openFileExplorer(folder) {
+  fxState.open = true;
+  fxState.folderName = folder.name;
+  fxState.rootPath = folder.cwd || '';
+  fxState.currentPath = '';
+  fxState.entriesByPath = new Map();
+  fxState.expanded = new Set();
+  fxState.selected = null;
+  fxState.detail = { kind: 'empty' };
+  fxState.error = null;
+  fxRevokePreviewUrl();
+  const modal = $('#fx-modal');
+  modal.hidden = false;
+  modal.classList.remove('hidden');
+  document.addEventListener('keydown', fxOnKeyDown);
+  $('#fx-close').onclick = closeFileExplorer;
+  fxRender();
+  void fxLoadList('');
+}
+
+function closeFileExplorer() {
+  fxState.open = false;
+  fxRevokePreviewUrl();
+  document.removeEventListener('keydown', fxOnKeyDown);
+  const modal = $('#fx-modal');
+  modal.classList.add('hidden');
+  modal.hidden = true;
+}
+
+function fxOnKeyDown(e) {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    closeFileExplorer();
+  }
+}
+
+function fxRevokePreviewUrl() {
+  if (fxState.previewUrl) {
+    URL.revokeObjectURL(fxState.previewUrl);
+    fxState.previewUrl = null;
+  }
+}
+
+async function fxApiGet(op, path) {
+  const url = `/api/sessions/folders/${encodeURIComponent(fxState.folderName)}/fs/${op}` +
+    (path != null ? `?path=${encodeURIComponent(path)}` : '');
+  return api(url);
+}
+
+async function fxLoadList(path) {
+  fxState.loading = true;
+  fxState.error = null;
+  fxRender();
+  try {
+    const r = await fxApiGet('list', path);
+    fxState.entriesByPath.set(r.path, r.entries);
+    if (r.truncated) {
+      fxState.error = `listing truncated (more than ${r.entries.length} entries)`;
+    }
+    fxState.currentPath = r.path;
+    if (r.rootPath) fxState.rootPath = r.rootPath;
+  } catch (e) {
+    fxState.error = `list failed: ${e.message}`;
+  } finally {
+    fxState.loading = false;
+    fxRender();
+  }
+}
+
+async function fxLoadRead(file) {
+  fxState.loading = true;
+  fxState.error = null;
+  fxRevokePreviewUrl();
+  fxRender();
+  try {
+    const r = await fxApiGet('read', file.path);
+    fxState.detail = { kind: 'text', file, content: r.content, language: r.language, version: r.version };
+  } catch (e) {
+    fxState.error = `read failed: ${e.message}`;
+    fxState.detail = { kind: 'empty' };
+  } finally {
+    fxState.loading = false;
+    fxRender();
+  }
+}
+
+async function fxLoadPreview(file, previewKind) {
+  fxState.loading = true;
+  fxState.error = null;
+  fxRevokePreviewUrl();
+  fxRender();
+  try {
+    const url = `/api/sessions/folders/${encodeURIComponent(fxState.folderName)}/fs/preview?path=${encodeURIComponent(file.path)}`;
+    const r = await fetch(url, { credentials: 'same-origin' });
+    if (!r.ok) {
+      let body = {};
+      try { body = await r.json(); } catch {}
+      throw new Error(body.error || `${r.status}`);
+    }
+    const blob = await r.blob();
+    fxState.previewUrl = URL.createObjectURL(blob);
+    fxState.detail = { kind: 'preview', file, previewKind, url: fxState.previewUrl };
+  } catch (e) {
+    fxState.error = `preview failed: ${e.message}`;
+    fxState.detail = { kind: 'empty' };
+  } finally {
+    fxState.loading = false;
+    fxRender();
+  }
+}
+
+async function fxSelectEntry(file) {
+  fxState.selected = file.path;
+  fxState.error = null;
+  if (file.kind === 'directory') {
+    if (fxState.expanded.has(file.path)) {
+      fxState.expanded.delete(file.path);
+      fxRender();
+    } else {
+      fxState.expanded.add(file.path);
+      fxRender();
+      if (!fxState.entriesByPath.has(file.path)) {
+        await fxLoadList(file.path);
+      }
+    }
+    return;
+  }
+  if (file.editable) {
+    await fxLoadRead(file);
+    return;
+  }
+  if (file.previewKind !== 'none') {
+    await fxLoadPreview(file, file.previewKind);
+  }
+}
+
+function fxRender() {
+  if (!fxState.open) return;
+  const pathEl = $('#fx-path');
+  pathEl.textContent = fxState.rootPath || '';
+  pathEl.title = fxState.rootPath || '';
+
+  const tree = $('#fx-tree');
+  tree.innerHTML = '';
+  const rootEntries = fxState.entriesByPath.get('') || [];
+  for (const entry of rootEntries) {
+    tree.appendChild(fxRenderEntry(entry, 0));
+  }
+  if (fxState.loading && rootEntries.length === 0) {
+    const ph = document.createElement('div');
+    ph.className = 'fx-empty';
+    ph.textContent = 'loading…';
+    tree.appendChild(ph);
+  }
+
+  const detail = $('#fx-detail');
+  detail.innerHTML = '';
+  if (fxState.error) {
+    const err = document.createElement('div');
+    err.className = 'fx-error';
+    err.textContent = fxState.error;
+    detail.appendChild(err);
+  }
+  if (fxState.detail.kind === 'empty') {
+    const ph = document.createElement('div');
+    ph.className = 'fx-empty';
+    ph.textContent = fxState.loading ? 'loading…' : 'select a file';
+    detail.appendChild(ph);
+  } else if (fxState.detail.kind === 'text') {
+    const head = document.createElement('div');
+    head.className = 'fx-detail-head';
+    head.textContent = fxState.detail.file.path;
+    detail.appendChild(head);
+    const pre = document.createElement('pre');
+    pre.className = 'fx-text';
+    pre.textContent = fxState.detail.content;
+    detail.appendChild(pre);
+  } else if (fxState.detail.kind === 'preview') {
+    const head = document.createElement('div');
+    head.className = 'fx-detail-head';
+    head.textContent = fxState.detail.file.path;
+    detail.appendChild(head);
+    const frame = document.createElement('div');
+    frame.className = 'fx-preview-frame';
+    if (fxState.detail.previewKind === 'image') {
+      const img = document.createElement('img');
+      img.src = fxState.detail.url;
+      img.alt = fxState.detail.file.name;
+      frame.appendChild(img);
+    } else if (fxState.detail.previewKind === 'pdf') {
+      const iframe = document.createElement('iframe');
+      iframe.src = fxState.detail.url;
+      iframe.title = fxState.detail.file.name;
+      frame.appendChild(iframe);
+    }
+    detail.appendChild(frame);
+  }
+}
+
+function fxRenderEntry(entry, depth) {
+  const wrap = document.createElement('div');
+  wrap.className = 'fx-row-wrap';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'fx-row';
+  btn.dataset.kind = entry.kind;
+  btn.dataset.active = String(fxState.selected === entry.path);
+  btn.disabled = !fxCanSelect(entry);
+  btn.style.setProperty('--fx-depth', String(depth));
+  const expanded = entry.kind === 'directory' && fxState.expanded.has(entry.path);
+  btn.setAttribute('aria-expanded', entry.kind === 'directory' ? String(expanded) : 'false');
+  const glyph = entry.kind === 'directory' ? (expanded ? '▾' : '▸') : ' ';
+  const badge = fxEntryBadge(entry);
+  btn.innerHTML = `
+    <span class="fx-row-glyph">${glyph}</span>
+    <span class="fx-row-name">${escapeHtml(entry.name)}</span>
+    <span class="fx-row-badge">${escapeHtml(badge)}</span>
+  `;
+  btn.addEventListener('click', () => void fxSelectEntry(entry));
+  wrap.appendChild(btn);
+  if (expanded) {
+    const children = fxState.entriesByPath.get(entry.path) || [];
+    const childWrap = document.createElement('div');
+    childWrap.className = 'fx-children';
+    for (const child of children) {
+      childWrap.appendChild(fxRenderEntry(child, depth + 1));
+    }
+    wrap.appendChild(childWrap);
+  }
+  return wrap;
+}
+
+function fxCanSelect(entry) {
+  if (entry.kind === 'directory') return true;
+  return entry.editable || entry.previewKind !== 'none';
+}
+
+function fxEntryBadge(entry) {
+  if (entry.kind === 'directory') return 'dir';
+  if (entry.kind === 'symlink') return 'link';
+  if (entry.editable) return entry.previewKind === 'none' ? 'txt' : entry.previewKind;
+  if (entry.previewKind !== 'none') return entry.previewKind;
+  return 'bin';
 }
 
 checkAuth();

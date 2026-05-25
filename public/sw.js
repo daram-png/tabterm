@@ -1,4 +1,4 @@
-const VERSION = 'tabterm-v20-session-nnnn-engine-tabs';
+const VERSION = 'tabterm-v21-file-explorer-phase1';
 const SHELL = [
   '/',
   '/index.html',

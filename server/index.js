@@ -27,6 +27,12 @@ import {
   readMeta as readFolderMeta,
   writeMeta as writeFolderMeta,
 } from './session-folder.js';
+import {
+  FileExplorerError,
+  listDirectory as fxListDirectory,
+  readTextFile as fxReadTextFile,
+  streamPreview as fxStreamPreview,
+} from './file-explorer.js';
 import { startWatchdog, stopWatchdog } from './watchdog.js';
 import { registerSystemRoutes } from './system.js';
 import { createLabelsStore, validateLabel } from './labels.js';
@@ -42,6 +48,9 @@ const WORKER_PREFIX = process.env.WORKER_PREFIX || 'worker-';
 const HYDRA_ENABLED = String(process.env.HYDRATEAMS_ENABLED ?? 'true') === 'true';
 const ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL || 'http://localhost:3456';
 const NEW_SESSION_PREFIX = process.env.NEW_SESSION_PREFIX || 'session-';
+const FILE_LIST_MAX_ENTRIES = Number(process.env.FILE_LIST_MAX_ENTRIES || 2000);
+const FILE_TEXT_MAX_BYTES = Number(process.env.FILE_TEXT_MAX_BYTES || 1048576);
+const FILE_PREVIEW_MAX_BYTES = Number(process.env.FILE_PREVIEW_MAX_BYTES || 52428800);
 
 // On Windows, even after pty.kill() and onExit fire, descendant processes
 // or antivirus/indexers can transiently hold the cwd. Retry rm with
@@ -653,6 +662,76 @@ app.delete('/api/sessions/folders/:name', async (req, reply) => {
     ip: req.ip,
   });
   return { ok: true, deleted: v.value };
+});
+
+// File explorer routes (Phase 1: read-only, jailed under WORKERS_ROOT/:name).
+// Mutating ops (write/create/move/delete) deferred to Phase 2/3 with CSRF.
+function resolveSessionCwd(req, reply) {
+  const v = validateSessionFolderName(req.params.name, {
+    subagentPrefix: WORKER_PREFIX,
+    sessionPrefix: NEW_SESSION_PREFIX,
+  });
+  if (v.error === 'subagent-protected') {
+    reply.code(403).send({ error: 'subagent-folder-protected' });
+    return null;
+  }
+  if (!v.ok) {
+    reply.code(400).send({ error: 'bad-name', reason: v.error });
+    return null;
+  }
+  const cwd = resolve(WORKERS_ROOT, v.value);
+  if (!existsSync(cwd)) {
+    reply.code(404).send({ error: 'folder-not-found' });
+    return null;
+  }
+  return cwd;
+}
+
+function sendFileExplorerError(reply, e, log) {
+  if (e instanceof FileExplorerError) {
+    return reply.code(e.statusCode).send({ error: e.code });
+  }
+  log.error(e);
+  return reply.code(500).send({ error: 'internal' });
+}
+
+app.get('/api/sessions/folders/:name/fs/list', async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  const cwd = resolveSessionCwd(req, reply);
+  if (!cwd) return;
+  try {
+    return await fxListDirectory(cwd, req.query?.path ?? '', {
+      maxEntries: FILE_LIST_MAX_ENTRIES,
+    });
+  } catch (e) {
+    return sendFileExplorerError(reply, e, app.log);
+  }
+});
+
+app.get('/api/sessions/folders/:name/fs/read', async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  const cwd = resolveSessionCwd(req, reply);
+  if (!cwd) return;
+  try {
+    return await fxReadTextFile(cwd, req.query?.path ?? '', {
+      maxBytes: FILE_TEXT_MAX_BYTES,
+    });
+  } catch (e) {
+    return sendFileExplorerError(reply, e, app.log);
+  }
+});
+
+app.get('/api/sessions/folders/:name/fs/preview', async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  const cwd = resolveSessionCwd(req, reply);
+  if (!cwd) return;
+  try {
+    return await fxStreamPreview(cwd, req.query?.path ?? '', reply, {
+      maxBytes: FILE_PREVIEW_MAX_BYTES,
+    });
+  } catch (e) {
+    return sendFileExplorerError(reply, e, app.log);
+  }
 });
 
 await app.register(fastifyStatic, {

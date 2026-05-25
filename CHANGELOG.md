@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.8.0 — 2026-05-25
+
+### Added — file explorer (Phase 1: read-only viewer)
+
+레퍼런스: [jcwleo/leominal feat: add active pane file explorer](https://github.com/jcwleo/leominal/commit/f985f5244ff09e9b49a1022ff43ab3401638f797). 디자인 차용, vanilla JS + Fastify 스택에 맞게 재구현.
+
+- 사이드바 세션 행 kebab 메뉴에 **Open files…** 액션 추가
+  - 클릭 시 full-screen modal 띄움. 좌측 트리 + 우측 디테일 패널. ESC 또는 X 로 닫기.
+  - 폴더는 클릭해서 펼치고 닫음. 파일은 클릭하면 우측에 표시.
+  - 텍스트 파일은 `<pre>` 로 raw (markdown 렌더링은 Phase 2 에서 도입 검토).
+  - 이미지(`png/jpg/jpeg/gif/webp/bmp/ico`) 와 PDF 는 blob URL 로 `<img>` / `<iframe>` 미리보기.
+  - 모바일 폭(<= 640px) 에서는 트리/디테일이 상하 split 으로 자동 전환.
+
+### Server (server/file-explorer.js, new)
+
+- `validateRelPath`: posix-only 경로 검증. 거부 항목 — backslash, `:` (drive letter / NTFS ADS), 절대 경로, `..` / `.` / 빈 segment, 제어 문자, 4096 자 초과
+- `assertNoSymlinkSegments`: 각 path segment 에 lstat → symlink/junction/reparse point 이면 400 차단
+- `assertContained`: 최종 realpath 가 root realpath 의 자손인지 startsWith + sep 검사
+- `resolveSafePath`: 2단계 jail (segment-walk + realpath 컨테인먼트). symlink 외에도 Windows 트레일링 닷/공백 quirk, 대소문자 정규화 escape 까지 커버
+- `listDirectory`: 디렉토리 우선 정렬, locale-aware base-insensitive. `maxEntries` 초과 시 truncate + flag
+- `readTextFile`: 확장자 + basename 기반 text/markdown 분류. NUL 비율 >2% 면 415 `binary-content` (확장자 위장 binary 파일 탐지)
+- `streamPreview`: ext → MIME 매핑된 binary 스트림. `Content-Type`, `Content-Length`, `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`, `Cache-Control: private, no-cache` 헤더 설정
+
+### Server routes (server/index.js)
+
+- `GET /api/sessions/folders/:name/fs/list?path=...` — 디렉토리 리스팅
+- `GET /api/sessions/folders/:name/fs/read?path=...` — 텍스트 read + `{ size, mtimeMs }` 버전 스탬프
+- `GET /api/sessions/folders/:name/fs/preview?path=...` — 이미지/PDF raw stream
+- 모두 `requireAuth` 만 사용 (read-only). Phase 2/3 의 write/create/move/delete 는 `requireCsrf` 추가 예정.
+- `:name` 은 기존 `validateSessionFolderName` 으로 검증 (folder.name 자체가 stable identity, leominal 의 HMAC root token 불필요).
+
+### Env limits (env override 가능)
+
+- `FILE_LIST_MAX_ENTRIES=2000` — 한 디렉토리 리스팅 최대 항목
+- `FILE_TEXT_MAX_BYTES=1048576` (1 MB) — 텍스트 read 최대
+- `FILE_PREVIEW_MAX_BYTES=52428800` (50 MB) — 이미지/PDF preview 최대
+
+### Tests
+
+- `server/file-explorer.test.js` (new, 14 cases, node:test)
+  - validateRelPath: 8 거부 패턴 (backslash/colon/absolute/dot/control/type/길이)
+  - previewKindForName / languageForName / isTextName classification
+  - listDirectory: 정렬 + 메타데이터 + truncated flag + traversal 거부
+  - readTextFile: text 성공, 413 size limit, 415 not-text, 415 binary-content (NUL 위장)
+  - resolveSafePath: symlink mid-path 거부 (Windows junction 으로 best-effort, 권한 없으면 skip)
+
+### Out of scope (별도 PR)
+
+- Phase 2 (v0.8.1): write, create, expectedVersion-based stale-save 409, textarea editor
+- Phase 3 (v0.9.0): delete (HMAC preview token 60s TTL), move/rename, descendant count confirm
+
+### Files changed
+
+- `server/file-explorer.js` (new, ~260 LOC)
+- `server/file-explorer.test.js` (new, 14 cases)
+- `server/index.js` (+78: imports, env consts, 3 routes, 2 helpers)
+- `public/app.js` (+220: state, openFileExplorer, fxLoadList/Read/Preview, fxRender, kebab button)
+- `public/index.html` (+13: modal shell)
+- `public/styles.css` (+80: modal + tree + detail + responsive)
+- `public/sw.js` VERSION → `tabterm-v21-file-explorer-phase1`
+- `package.json` 0.7.5 → 0.8.0
+
+### Process notes
+
+- ccx peer review 수행: PEER A self draft + PEER B GPT (ultrabrain) 병렬 critique on plan
+- 보안 모델 검증: leominal 의 symlink walk + realpath containment 패턴을 그대로 차용, Windows 추가 가드 (backslash/colon/NUL 비율 위장 탐지)
+- HMAC root token 생략 결정: tabterm 의 `:name` 은 이미 `validateSessionFolderName` 으로 검증된 stable identity, leominal 의 terminalId→cwd resolve 동적 문제가 없음
+
 ## 0.7.5 — 2026-05-25
 
 ### Changed
