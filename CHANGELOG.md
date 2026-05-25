@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.7.5 — 2026-05-25
+
+### Changed
+- 신규 세션 폴더명을 `session-{14digits}-{4hex}` (24자) → `session-NNNN` (4자리 숫자, 총 12자) 로 축약
+  - 사이드바 행 공간 확보가 목적. 기존 폴더명은 그대로 유지 (rename 없음).
+  - 네임스페이스 10,000 + `mkdir(non-recursive)` 로 race-free 충돌 검사. 50회 retry 후 실패 시 500 (`mkdir-exhausted`) 응답.
+  - 이론적으로 활성 폴더 ~5,000개에서 첫 시도 99% 성공. 그 이상은 archive 권장 또는 자릿수 확장.
+- 사이드바 sessions 영역을 engine 별 sub-section 으로 분리: `sessions · claude` (amber 헤더), `sessions · opencode` (accent blue 헤더)
+  - 둘 다 alive 한 폴더가 있을 때만 해당 헤더 노출. 한쪽만 있으면 그 한쪽만 표시.
+  - subagent 섹션은 기존 그대로 별도 유지.
+- 세션 행 3줄 → 2줄 compact 표시: name + meta 만 표시, full cwd 는 `<div>` 인라인 대신 `el.title` (hover tooltip) 로 이동
+  - meta 줄은 PTY 상태(`no PTY`/`exit N`/`in slot L|R`/`detached`) + 폴더명 (label 별칭 있을 때) + 상대시간 (`5m ago` 등) 유지
+  - `.ws-path` CSS rule 자체는 잔존 (forward-compat / 추후 fallback). 인라인 사용처 없음.
+- `package.json` 0.6.3 → 0.7.5 (직전 snapshot 의 0.7.2-0.7.4 CHANGELOG 와 정렬)
+- `public/sw.js` VERSION → `tabterm-v20-session-nnnn-engine-tabs`
+
+### Fixed (peer-review-driven)
+- 신규 폴더 leak on spawn failure: `mkdir(cwd)` 성공 후 `sessions.create()` 가 throw 하면 빈 `session-NNNN` 폴더가 남아 10k 네임스페이스를 burn 하던 회귀
+  - 수정: `createdNow=true` 인 경로의 spawn catch 블록에서 `rm(cwd, { recursive, force })` rollback + `session.folder.rollback` audit 로그
+  - 구 timestamp 네임스페이스에서는 폴더가 leak 돼도 충돌 사실상 0 이라 무해했지만, 4-digit 으로 좁히면서 직접 노출된 리스크
+- 폴더 할당 capacity 주석 정확도 보정: "<99% on first try" → 실제 first-try 성공률 `(10_000-N)/10_000` 명시, 50-retry 합산 성공률은 N≈9000 까지 사실상 100% 임을 부연
+
+### Deferred (peer-review surfaced, 별도 commit)
+- 기존 `startRename(folder.name)` → `data-pane-id` 쿼리 불일치 (session-folder 행은 `data-folder-name` 사용) - pre-existing 버그, 이번 PR scope 밖
+- `el.title` tooltip 접근성 (iPad/keyboard hover 불가) - mobile 사용자 path 발견성 손실. kebab "Copy path" action 추가는 후속
+- 할당 retry 후 scan-0000-9999 fallback - N≥9000 archive 권장 시점이라 YAGNI
+
 ## 0.7.4 — 2026-05-23
 
 ### Fixed

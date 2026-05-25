@@ -477,16 +477,37 @@ app.post('/api/sessions', async (req, reply) => {
       }));
     }
   } else {
-    // Mode 1: 신규 폴더
-    const ts = new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14);
-    const rand = randomBytes(2).toString('hex');
-    folderName = `${NEW_SESSION_PREFIX}${ts}-${rand}`;
-    cwd = resolve(WORKERS_ROOT, folderName);
+    // Mode 1: 신규 폴더 - compact name "session-NNNN" (4-digit random).
+    // 10_000 namespace + atomic mkdir (non-recursive) for race-free collision detect.
+    // Retry math: first-try success = (10_000 - N) / 10_000 (N = existing folders).
+    // 50-retry combined success stays near 100% up to N≈9_000. Beyond that, archive
+    // old sessions or extend digit width — see mkdir-exhausted branch below.
     try {
-      await mkdir(cwd, { recursive: true });
-      createdNow = true;
+      await mkdir(WORKERS_ROOT, { recursive: true });
     } catch (e) {
-      return reply.code(500).send({ error: 'mkdir-failed', message: String(e?.message || e) });
+      return reply.code(500).send({ error: 'mkdir-failed', message: `root: ${e?.message || e}` });
+    }
+    let created = false;
+    let attempts = 0;
+    const MAX_ATTEMPTS = 50;
+    while (attempts < MAX_ATTEMPTS && !created) {
+      const num = String(Math.floor(Math.random() * 10000)).padStart(4, '0');
+      folderName = `${NEW_SESSION_PREFIX}${num}`;
+      cwd = resolve(WORKERS_ROOT, folderName);
+      try {
+        await mkdir(cwd); // non-recursive: throws EEXIST on collision
+        created = true;
+        createdNow = true;
+      } catch (e) {
+        if (e?.code === 'EEXIST') { attempts++; continue; }
+        return reply.code(500).send({ error: 'mkdir-failed', message: String(e?.message || e) });
+      }
+    }
+    if (!created) {
+      return reply.code(500).send({
+        error: 'mkdir-exhausted',
+        message: `Could not allocate unique ${NEW_SESSION_PREFIX}NNNN after ${MAX_ATTEMPTS} attempts. Archive old sessions or extend digit width.`,
+      });
     }
   }
 
@@ -559,6 +580,14 @@ app.post('/api/sessions', async (req, reply) => {
     return { session: s.summary(), envSource: 'none', envWarnings: [], cwd, folderName };
   } catch (e) {
     app.log.error(e);
+    if (createdNow) {
+      try {
+        await rm(cwd, { recursive: true, force: true });
+        audit.log({ event: 'session.folder.rollback', cwd, reason: 'spawn-failed', ip: req.ip });
+      } catch (cleanupErr) {
+        app.log.warn({ err: cleanupErr?.message, cwd }, '[session] rollback rm failed');
+      }
+    }
     return reply.code(500).send({ error: 'spawn-failed', message: String(e?.message || e) });
   }
 });

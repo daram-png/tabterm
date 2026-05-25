@@ -152,6 +152,8 @@ html, body {
   color: var(--muted);
   user-select: none;
 }
+.ws-section-engine-claude { color: var(--amber); }
+.ws-section-engine-opencode { color: var(--accent); }
 .ws-slot-tag {
   position: absolute; right: 10px; top: 10px;
   font-family: "Geist Mono", monospace; font-size: 10px;

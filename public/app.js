@@ -324,12 +324,20 @@ function renderSidebar() {
     .sort((a, b) => (b.folder.lastUsedAt || 0) - (a.folder.lastUsedAt || 0));
 
   if (folderRows.length) {
-    const h = document.createElement('div');
-    h.className = 'ws-section';
-    h.textContent = 'sessions';
-    list.appendChild(h);
-    for (const { folder, pane } of folderRows) {
-      list.appendChild(renderSessionFolderRow(folder, pane));
+    const groups = { claude: [], opencode: [] };
+    for (const row of folderRows) {
+      const eng = row.folder.engine === 'opencode' ? 'opencode' : 'claude';
+      groups[eng].push(row);
+    }
+    for (const eng of ['claude', 'opencode']) {
+      if (groups[eng].length === 0) continue;
+      const h = document.createElement('div');
+      h.className = `ws-section ws-section-engine-${eng}`;
+      h.textContent = `sessions · ${eng}`;
+      list.appendChild(h);
+      for (const { folder, pane } of groups[eng]) {
+        list.appendChild(renderSessionFolderRow(folder, pane));
+      }
     }
   }
 
@@ -386,6 +394,7 @@ function renderSessionFolderRow(folder, pane) {
   const ageText = relativeTime(folder.lastUsedAt);
   const agePart = ageText ? ' · ' + escapeHtml(ageText) : '';
 
+  el.title = folder.cwd;
   el.innerHTML = `
     <span class="ws-glyph ${gkind}">${glyph}</span>
     ${slotTag}
@@ -393,7 +402,6 @@ function renderSessionFolderRow(folder, pane) {
     <span class="ws-kebab-btn" data-act="kebab" data-key="${escapeHtml(folder.name)}" title="Actions">⋮</span>
     <div class="ws-name">${escapeHtml(name)}</div>
     <div class="ws-meta">${escapeHtml(metaText)}${folder.label ? ' · ' + escapeHtml(folder.name) : ''}${agePart}</div>
-    <div class="ws-path">${escapeHtml(folder.cwd)}</div>
   `;
 
   el.addEventListener('click', async (e) => {
