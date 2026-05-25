@@ -453,35 +453,68 @@ async function postNewSessionWithForceConfirm(body) {
   }
 }
 
+// POST /api/sessions for general (kind:'session') with cwd, handling 409
+// session-folder-busy. Mirrors postNewSessionWithForceConfirm shape.
+// Returns null on user-decline; throws on real failure. The evictedIds list
+// surfaces the IDs the server told us it would kill so the caller can prune
+// matching local panes — silent eviction otherwise leaks WS + xterm instances.
+async function postSessionFolderWithBusyConfirm(body) {
+  try {
+    const response = await api('/api/sessions', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    return { response, evictedIds: [] };
+  } catch (e) {
+    if (e?.body?.error !== 'session-folder-busy') throw e;
+    const existing = e.body.existing || [];
+    const evictedIds = existing.map((s) => s.id).filter(Boolean);
+    const ok = window.confirm(`이 폴더에 다른 세션이 ${existing.length}개 살아있습니다. 종료하고 진행할까요?`);
+    if (!ok) return null;
+    const response = await api('/api/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ ...body, force: true }),
+    });
+    return { response, evictedIds };
+  }
+}
+
+// Drop local pane state (WS, xterm instance, slot) for the given session IDs.
+// Called after the server force-evicts sessions so we don't leak orphan panes.
+// Returns true if anything was pruned. Caller decides whether to re-render.
+function prunePanesById(ids) {
+  if (!ids?.length) return false;
+  const stale = new Set(ids);
+  let pruned = false;
+  for (const p of state.panes) {
+    if (!stale.has(p.sessionId)) continue;
+    try { p.ws?.close(); } catch {}
+    try { p.term?.dispose?.(); } catch {}
+    detachFromSlots(p.id);
+    pruned = true;
+  }
+  if (pruned) state.panes = state.panes.filter((p) => !stale.has(p.sessionId));
+  return pruned;
+}
+
 async function spawnSessionToFolder(cwd) {
   try {
-    const r = await fetch('/api/sessions', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: {
-        'Content-Type': 'application/json',
-        ...csrfHeader(),
-      },
-      body: JSON.stringify({ kind: 'session', cwd, cols: 120, rows: 32 }),
+    const result = await postSessionFolderWithBusyConfirm({
+      kind: 'session', cwd, cols: 120, rows: 32,
     });
-    if (r.status === 409) {
-      const data = await r.json();
-      const ok = window.confirm(`이 폴더에 다른 세션이 살아있습니다. 종료하고 새로 시작할까요?\n(${data.existing?.length || 0}개)`);
-      if (!ok) return;
-      const r2 = await fetch('/api/sessions', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: {
-          'Content-Type': 'application/json',
-          ...csrfHeader(),
-        },
-        body: JSON.stringify({ kind: 'session', cwd, cols: 120, rows: 32, force: true }),
-      });
-      if (!r2.ok) throw new Error(`spawn force failed ${r2.status}`);
-    } else if (!r.ok) {
-      throw new Error(`spawn failed ${r.status}`);
-    }
-    await refreshAll();
+    if (!result) return; // user declined the busy-folder confirm
+    const { response, evictedIds } = result;
+    // Drop local pane state for sessions the server just killed, otherwise
+    // their dead WS + xterm linger and renderSidebar matches them by cwd.
+    prunePanesById(evictedIds);
+    // Promote the new session straight into a slot so user sees the terminal
+    // immediately — one click attaches + spawns. fetchFolders refreshes
+    // lastUsedAt so sidebar order reflects the activity.
+    const newId = response?.session?.id;
+    if (newId && !paneById(newId)) addPaneFromServer(response.session);
+    await fetchFolders();
+    if (newId) assignToSlot(newId);
+    else renderSidebar();
   } catch (e) {
     console.error('[spawn] folder attach failed', e);
     alert(`세션 spawn 실패: ${e.message}`);
@@ -844,6 +877,7 @@ function addPaneFromServer(session) {
     sessionId: session.id,
     kind: session.kind || 'worker',
     workerIndex: session.workerIndex ?? null,
+    engine: session.engine || null,
     label: session.label,
     cwd: session.cwd,
     term, fit,
@@ -873,38 +907,65 @@ async function restartPane(id) {
   if (!p) return;
   const kind = p.kind;
   const idx = p.workerIndex;
+  // Preserve engine across restart so OpenCode session re-launches as OpenCode.
+  // Session restart re-attaches to the SAME folder (cwd preserved). Default
+  // body has no force=true — closePane awaits PTY exit, so the common path
+  // succeeds without prompt. If the server returns 409 session-folder-busy,
+  // that means an unrelated alive session exists at the same cwd (other browser,
+  // stale client, external trigger): the helper surfaces a confirm before
+  // force-evicting, avoiding silent eviction.
+  const engine = p.engine || undefined;
+  const cwd = p.cwd;
   await closePane(id);
   try {
     const body = kind === 'worker'
       ? { kind: 'worker', workerIndex: idx, cols: 120, rows: 32 }
-      : { kind: 'session', cols: 120, rows: 32 };
-    // closePane awaits the DELETE which now awaits PTY exit (v0.6.1), so by
-    // the time we POST the old session should be gone. But a stale orphan
-    // worker from a previous tabterm crash can still trigger 409, hence the
-    // force-confirm wrapper.
-    const r = kind === 'worker'
-      ? await postNewSessionWithForceConfirm(body)
-      : await api('/api/sessions', { method: 'POST', body: JSON.stringify(body) });
-    addPaneFromServer(r.session);
-    assignToSlot(r.session.id);
+      : { kind: 'session', engine, cwd, cols: 120, rows: 32 };
+    let response;
+    let evictedIds = [];
+    if (kind === 'worker') {
+      response = await postNewSessionWithForceConfirm(body);
+    } else {
+      const result = await postSessionFolderWithBusyConfirm(body);
+      if (!result) return; // user declined the busy-folder confirm
+      ({ response, evictedIds } = result);
+      prunePanesById(evictedIds);
+    }
+    addPaneFromServer(response.session);
+    assignToSlot(response.session.id);
+    if (kind === 'session') {
+      // lastUsedAt bumped on the server; pull fresh folder list so sidebar
+      // order/timestamp reflects the restart.
+      await fetchFolders();
+      renderSidebar();
+    }
   } catch (err) {
     if (err?.body?.error === 'worker-session-exists') return; // user declined confirm
     toast(`restart failed: ${err.message || err}`, 'err');
   }
 }
 
-/* ---------- new session ---------- */
-$('#btn-new-session').addEventListener('click', async () => {
+/* ---------- new session (engine = claude | opencode) ---------- */
+async function createSession(engine) {
   try {
     const r = await api('/api/sessions', {
       method: 'POST',
-      body: JSON.stringify({ kind: 'session', cols: 120, rows: 32 }),
+      body: JSON.stringify({ kind: 'session', engine, cols: 120, rows: 32 }),
     });
     addPaneFromServer(r.session);
     assignToSlot(r.session.id);
-    toast(`new session: ${r.session.label}`, 'ok', 3000);
-  } catch (err) { toast(`new session failed: ${err.message || err}`, 'err'); }
-});
+    // The server creates a new folder on disk; pull it into state.folders so
+    // the sidebar shows the new session immediately instead of waiting for a
+    // page reload. renderSidebar must run after fetchFolders to pick it up.
+    await fetchFolders();
+    renderSidebar();
+    toast(`new ${engine} session: ${r.session.label}`, 'ok', 3000);
+  } catch (err) {
+    toast(`new ${engine} session failed: ${err.message || err}`, 'err');
+  }
+}
+$('#btn-new-claude').addEventListener('click', () => createSession('claude'));
+$('#btn-new-opencode').addEventListener('click', () => createSession('opencode'));
 
 /* ---------- top buttons ---------- */
 $('#btn-soft-stop').addEventListener('click', () => {
@@ -1108,10 +1169,21 @@ function initImeBar() {
   const send = $('#ime-send');
   if (!input || !send) return;
 
+  // flush() is the safer default — commits textarea contents to PTY without
+  // submitting. flushImeText(true) is the explicit-submit path (Enter key,
+  // Send button): it appends \r so the PTY's claude/opencode prompt actually
+  // submits instead of just receiving the text and waiting. Empty textarea +
+  // withEnter sends a bare \r so the user can submit an already-populated
+  // native prompt with just the rail's Send button.
   function flush() {
+    return flushImeText(false);
+  }
+
+  function flushImeText(withEnter = false) {
     const v = input.value;
-    if (!v) return;
-    imeSendData(v);
+    if (!v && !withEnter) return;
+    if (v) imeSendData(v);
+    if (withEnter) imeSendData('\r');
     input.value = '';
     imeTargetPaneId = null;
   }
@@ -1123,7 +1195,7 @@ function initImeBar() {
     if (!imeTargetPaneId) rememberImeTarget();
   });
 
-  // Enter (no shift) -> flush; Shift+Enter -> textarea newline.
+  // Enter (no shift) -> flush text + \r; Shift+Enter -> textarea newline.
   // Guard against IME composition: e.isComposing or keyCode 229 means the
   // Korean keyboard is still committing — let it commit first, then user
   // can press Enter again.
@@ -1131,16 +1203,17 @@ function initImeBar() {
     if (e.key !== 'Enter' || e.shiftKey) return;
     if (e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
-    flush();
+    flushImeText(true);
   });
   // Safety net: if compositionend never fires (rare iOS keyboards), blur flushes
+  // text only — no \r, since blur is not an explicit submit signal.
   input.addEventListener('blur', () => {
     if (input.value) flush();
   });
 
   send.addEventListener('click', () => {
     rememberImeTarget();
-    flush();
+    flushImeText(true);
   });
 
   // Auxiliary key buttons

@@ -16,7 +16,7 @@ import { sessions } from './sessions.js';
 import { registerWs } from './ws.js';
 import { audit } from './audit.js';
 import { ensureHydraReady, hydraStatus } from './hydra.js';
-import { loadWorkerEnv, buildClaudeInvocation } from './config.js';
+import { loadWorkerEnv, buildClaudeInvocation, buildEngineInvocation } from './config.js';
 import { killStaleBot } from './kill-stale-bot.js';
 import {
   listSessionFolders,
@@ -24,6 +24,8 @@ import {
   ensureMeta,
   touchLastUsed,
   setLabel as setFolderLabel,
+  readMeta as readFolderMeta,
+  writeMeta as writeFolderMeta,
 } from './session-folder.js';
 import { startWatchdog, stopWatchdog } from './watchdog.js';
 import { registerSystemRoutes } from './system.js';
@@ -413,7 +415,7 @@ async function spawnWorkerSession({ workerIndex, label, cols, rows, ip, force = 
 app.post('/api/sessions', async (req, reply) => {
   if (!requireAuth(req, reply)) return;
   if (!requireCsrf(req, reply)) return;
-  const { label, kind, workerIndex, cols, rows, force } = req.body || {};
+  const { label, kind, workerIndex, cols, rows, force, engine } = req.body || {};
   const sessionKind = kind === 'session' ? 'session' : 'worker';
 
   if (sessionKind === 'worker') {
@@ -428,8 +430,10 @@ app.post('/api/sessions', async (req, reply) => {
   // general session — no ccx env. 두 모드:
   //   1) cwd 미지정 → 새 폴더 mkdir + tabterm.json 작성 (legacy POST 동작)
   //   2) cwd 지정 → 기존 폴더에 attach (validate 후), tabterm.json touch
-  const inv = buildClaudeInvocation();
-  const claudeArgs = process.env.SESSION_CLAUDE_ARGS || '';
+  // engine: 'claude' (default) or 'opencode' — picks engine-specific command/args/env
+  // Client may omit engine on folder-reattach (mode 2) — server then reads
+  // from the folder's tabterm.json so previously-OpenCode folders relaunch as OpenCode.
+  const explicitEngine = engine === 'opencode' ? 'opencode' : (engine === 'claude' ? 'claude' : null);
 
   let cwd;
   let folderName;
@@ -486,10 +490,36 @@ app.post('/api/sessions', async (req, reply) => {
     }
   }
 
+  // Resolve final engine: explicit body > folder meta (mode 2 reattach) > 'claude'.
+  let sessionEngine = explicitEngine;
+  if (sessionEngine === null && !createdNow) {
+    try {
+      const meta = await readFolderMeta(cwd);
+      sessionEngine = meta.engine || 'claude';
+    } catch { sessionEngine = 'claude'; }
+  }
+  if (sessionEngine === null) sessionEngine = 'claude';
+
+  const inv = buildEngineInvocation(sessionEngine);
+  const claudeArgs = inv.sessionArgsStr;
+
   // tabterm.json 자동 작성 (Mode 1) 또는 touch (Mode 2)
+  // Mode 2 + explicitEngine: persist new engine to meta so future folder-clicks
+  // (which omit engine) honor the change instead of reverting to the stored value.
   try {
     if (createdNow) {
-      await ensureMeta(cwd, { label: typeof label === 'string' ? label : '' });
+      await ensureMeta(cwd, {
+        label: typeof label === 'string' ? label : '',
+        engine: sessionEngine,
+      });
+    } else if (explicitEngine !== null) {
+      const meta = await readFolderMeta(cwd);
+      await writeFolderMeta(cwd, {
+        label: meta.label,
+        engine: explicitEngine,
+        createdAt: meta.createdAt,
+        lastUsedAt: Date.now(),
+      });
     } else {
       await touchLastUsed(cwd);
     }
@@ -501,6 +531,12 @@ app.post('/api/sessions', async (req, reply) => {
 
   const sessionLabel = label || folderName;
   try {
+    // engine-specific env: opencode sessions point at Nopersb (18802),
+    // claude sessions inherit HydraTeams default (3456).
+    const sessionExtraEnv = sessionEngine === 'opencode'
+      ? { ANTHROPIC_BASE_URL: inv.anthropicBaseUrl }
+      : {};
+
     const s = sessions.create({
       label: sessionLabel,
       cwd,
@@ -508,15 +544,16 @@ app.post('/api/sessions', async (req, reply) => {
       claudeArgs,
       cols: Math.min(Math.max(Number(cols) || 120, 20), 400),
       rows: Math.min(Math.max(Number(rows) || 32, 8), 200),
-      extraEnv: {},
-      meta: { kind: 'session', workerIndex: null },
-      onExit: ({ id, exitCode }) => audit.log({ event: 'session.exit', id, exitCode, kind: 'session' }),
+      extraEnv: sessionExtraEnv,
+      meta: { kind: 'session', workerIndex: null, engine: sessionEngine },
+      onExit: ({ id, exitCode }) => audit.log({ event: 'session.exit', id, exitCode, engine: sessionEngine, kind: 'session' }),
     });
     audit.log({
       event: createdNow ? 'session.folder.create' : 'session.folder.attach',
       id: s.id,
       cwd,
       kind: 'session',
+      engine: sessionEngine,
       ip: req.ip,
     });
     return { session: s.summary(), envSource: 'none', envWarnings: [], cwd, folderName };

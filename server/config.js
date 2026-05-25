@@ -67,3 +67,20 @@ export function buildClaudeInvocation() {
   const argsStr = process.env.CLAUDE_ARGS || '';
   return { cmd, argsStr };
 }
+
+export function buildEngineInvocation(engine) {
+  if (engine === 'opencode') {
+    return {
+      cmd: process.env.OPENCODE_COMMAND || 'opencode',
+      argsStr: process.env.OPENCODE_ARGS || '',
+      sessionArgsStr: process.env.SESSION_OPENCODE_ARGS || '',
+      anthropicBaseUrl: process.env.OPENCODE_ANTHROPIC_BASE_URL || 'http://127.0.0.1:18802',
+    };
+  }
+  return {
+    cmd: process.env.CLAUDE_COMMAND || 'claude',
+    argsStr: process.env.CLAUDE_ARGS || '',
+    sessionArgsStr: process.env.SESSION_CLAUDE_ARGS || '',
+    anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL || 'http://localhost:3456',
+  };
+}

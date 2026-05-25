@@ -1,4 +1,4 @@
-const VERSION = 'tabterm-v14-worker-session-force-confirm';
+const VERSION = 'tabterm-v19-ipad-ime-enter-fix';
 const SHELL = [
   '/',
   '/index.html',

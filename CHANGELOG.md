@@ -1,5 +1,98 @@
 # Changelog
 
+## 0.7.4 — 2026-05-23
+
+### Fixed
+- iPad 한글 IME rail bar 에서 Enter 키 / Send 버튼 눌러도 PTY 에 `\r` 안 들어가던 버그
+  - 증상: 사용자가 한글 입력 후 Enter → claude/opencode prompt 에 텍스트만 들어가고 submit 안 됨
+  - 원인: `initImeBar()` 의 `flush()` 가 textarea value 만 `imeSendData(v)` 로 보내고 carriage return append 안 함. PTY 입장에서는 사용자가 텍스트만 입력하고 Enter 안 친 상태와 동일
+  - 수정:
+    - 새 `flushImeText(withEnter)` 추가. withEnter=true 면 text 전송 후 별도 `imeSendData('\r')` 호출
+    - 기존 `flush()` 는 `flushImeText(false)` wrapper 로 유지 (safer default)
+    - Enter 키 keydown + Send 버튼 click → `flushImeText(true)` 명시 submit
+    - blur (자동 flush) + IME aux key click (esc/tab/arrows/ctrl-c/bs 누르기 전 text 비우기) → `flush()` 유지, `\r` 없음
+    - 빈 textarea + Enter/Send 면 bare `\r` 전송 (이미 채워진 prompt 만 submit 시 유용)
+  - composition 가드 (`e.isComposing || e.keyCode === 229`) 그대로 유지. compositionend flush 추가 X (double-fire 트랩 회피)
+  - `public/sw.js`: VERSION → `tabterm-v19-ipad-ime-enter-fix`
+
+### Process notes
+- Codex peer review (ccx mode, 2-round discuss): 둘 다 거의 동일 draft. helper 추가 + `\r` 별도 sendWs 호출 + `flush()` wrapper 유지에 합의. disagreement 없음
+
+## 0.7.3 — 2026-05-23
+
+### Fixed
+- 0.7.2 의 restart/spawn force 경로에서 silent eviction 위험 제거 (Codex peer review 반영)
+  - 원인 (Codex 발견):
+    - `restartPane()` 이 `force: true` 무조건 → 같은 cwd 에 alive 한 다른 client/window/external session 이 있으면 confirm 없이 evict
+    - `spawnSessionToFolder()` 가 force evict 후 stale pane 의 WS + xterm 인스턴스를 prune 안 함 → 메모리 누수 + renderSidebar 가 cwd 매칭으로 stale pane 을 폴더 행에 임시로 표시
+  - 수정:
+    - 새 helper `postSessionFolderWithBusyConfirm(body)` 추가. `postNewSessionWithForceConfirm` (worker용) 과 대칭. 기본은 force 없이 시도 → 409 면 confirm 후 force 재시도, decline 시 null 반환. 반환은 `{ response, evictedIds }` 형태로 server 가 죽일 ID 목록 노출
+    - 새 helper `prunePanesById(ids)` 추가. WS close + term dispose + slot detach + state.panes 필터링. render side effect 없음 (caller 가 결정)
+    - `restartPane()` session 분기: force=true 제거, helper 경유. evictedIds 받아 prune
+    - `spawnSessionToFolder()`: 인라인 409 처리 → helper 경유. evictedIds 받아 prune. fetch 직접 호출 제거 (api 헬퍼로 통일)
+  - 효과: 일반 경로 (다른 alive session 없음) 는 prompt 없이 그대로 동작. 충돌 시에만 confirm. silent eviction + pane 누수 둘 다 해소
+  - `public/sw.js`: VERSION → `tabterm-v18-restart-no-silent-evict`
+  - `refreshAll()` 의 prune 로직도 동일한데 DRY 통합은 scope creep 회피 (다음 리팩터링에서)
+
+### Process notes
+- ccx mode 활성화. 이번 amend 는 Claude ∥ Codex independent draft → compare (max 2 rounds) → 합의 도달 (disagreement 없음). 자세한 review 흐름은 `~/session-reports/20260523-103xxx-session-ebdc-tabterm-codex-peer-amend.md`
+
+## 0.7.2 — 2026-05-23
+
+### Fixed
+- 세션 ↻ restart 가 새 폴더를 만들던 동작 → 같은 폴더 재attach 로 변경
+  - 원인: `restartPane()` 의 session 분기가 body 에 `cwd` 를 안 보냄 → 서버가 Mode 1 (mkdir 새 폴더) 로 처리 → 사이드바에 새 session 항목이 추가됨. 사용자가 원한 건 같은 폴더의 PTY 만 재시작.
+  - 수정: `public/app.js` `restartPane()` session 분기에서 `cwd: p.cwd, force: true` 추가. 서버는 Mode 2 + force 로 살아있는 PTY evict 후 같은 폴더 재spawn. engine 도 그대로 영속화. fetchFolders + renderSidebar 호출로 lastUsedAt 갱신 반영.
+- 사이드바 dead/idle 폴더 클릭 시 (`spawnSessionToFolder`) spawn 후 슬롯에 자동 attach 안 되던 minor UX 버그
+  - 원인: 기존 코드는 `refreshAll()` 만 호출 → `addPaneFromServer` 까지만 됨. 사용자가 다시 한 번 폴더 클릭해야 슬롯 attach.
+  - 수정: 응답의 `session.id` 받아 `addPaneFromServer + assignToSlot` 직접 호출. fetchFolders 도 추가.
+- `public/sw.js`: VERSION → `tabterm-v17-spawn-folder-auto-slot-attach`
+
+### Notes
+- 서버 코드 미변경 → tabterm 재시작 불필요. 브라우저 Ctrl+Shift+R 만.
+- restart 가 같은 폴더 재사용하므로 폴더 history (tabterm.json, 사용자 작업 파일 등) 보존됨. 새 폴더가 필요하면 `+ Claude` / `+ OpenCode` 버튼 사용.
+
+## 0.7.1 — 2026-05-23
+
+### Fixed
+- 새 세션 (+ Claude / + OpenCode) 클릭 시 사이드바에 즉시 안 나타나던 버그
+  - 원인: `createSession()` 이 `addPaneFromServer + assignToSlot` 만 호출, 서버가 새로 만든 폴더를 `state.folders` 로 끌어오지 않음. `renderSidebar()` 는 folder-driven 이라 새 폴더가 state 에 없으면 사이드바에 못 그림 (슬롯 L/R 의 터미널은 state.panes 기반이라 즉시 보였음).
+  - 수정: `public/app.js` `createSession()` 내 `assignToSlot` 직후 `await fetchFolders(); renderSidebar();` 추가
+  - `public/sw.js`: VERSION → `tabterm-v16-createsession-folder-refresh` (서비스 워커 캐시 무효화)
+  - 적용 후 사용자 verify 필요: 브라우저 Ctrl+Shift+R 한 번
+
+### Notes
+- 서버 코드 미변경 → tabterm 재시작 불필요. 브라우저 hard refresh 만으로 적용.
+- 동일 turn 에 `~/.config/opencode/tui.json` 의 잘못된 plugin entry (`oh-my-openagent/tui`) 도 제거 (opencode TUI 가 매 시작마다 GitHub 인증 띄우던 원인). 자세한 진단은 `~/session-reports/20260523-095951-session-ebdc-tabterm-opencode-github-login-and-sidebar-refresh-fix.md`
+
+## 0.7.0 — 2026-05-23
+
+### Added
+- 엔진 선택 가능한 일반 세션 — "+ New session" 버튼 1개를 "+ Claude" + "+ OpenCode" 2개로 분리
+  - 동기: OpenCode (sst/opencode) + Oh My OpenAgent (OMO) 도입. Claude 워커는 그대로 두면서 새 세션은 엔진별로 띄울 수 있게.
+  - 서버:
+    - `.env`: `OPENCODE_COMMAND`, `OPENCODE_ARGS`, `SESSION_OPENCODE_ARGS`, `OPENCODE_ANTHROPIC_BASE_URL=http://127.0.0.1:18802` 추가
+    - `server/config.js`: `buildEngineInvocation(engine)` 신설 — engine 에 따라 cmd/args/baseURL 반환
+    - `server/index.js`: POST `/api/sessions` 가 body 의 `engine` ('claude'|'opencode') 받음. opencode 일 때 `ANTHROPIC_BASE_URL=18802` (Nopersb 프록시) 를 spawn env 로 주입. claude 는 기본 3456 (HydraTeams). audit 로그에 engine 기록
+    - `server/session-folder.js`: schema v1 → v2. `engine` 필드 영속화. v1 + missing/invalid 는 `'claude'` 로 fail-closed
+    - `server/sessions.js`: `summary()` 에 `engine` 필드 노출
+  - 클라이언트:
+    - `public/index.html`: 단일 "+/New session" 버튼 → 두 개 (`#btn-new-claude`, `#btn-new-opencode`)
+    - `public/styles.css`: `.ws-add-opencode` 색상 차별화 (파란톤)
+    - `public/app.js`: `createSession(engine)` factory, `addPaneFromServer` 가 pane 에 `engine` 저장, `restartPane` 이 `p.engine` 전달
+    - `public/sw.js`: VERSION → `tabterm-v15-engine-split-claude-opencode` (캐시 무효화)
+  - 영속화:
+    - Mode 1 (신규 폴더): `tabterm.json` 에 engine 기록 → 다음 folder click 시 자동 그 엔진으로 spawn
+    - Mode 2 + body 명시 engine: meta 도 같이 갱신 (다음 reattach 시 일관성)
+    - Mode 2 + body engine 미지정: 폴더 meta 의 engine 사용 (default 'claude')
+  - 백업: 변경 전 모든 파일이 `C:\Tools\tabterm\backups-20260523-011116\` 에 저장됨
+  - Codex peer review 6라운드 (rounds 5+6) 모두 반영 (sw.js 캐시 + reattach engine 보존 + mode-2 explicit override 영속화)
+
+### Notes
+- Worker tabs (worker-0..7) 는 무변경. 항상 Claude + HydraTeams.
+- OpenCode 세션 사용을 위해서는 OpenCode CLI + Nopersb OAuth proxy (port 18802, nssm 서비스 `nopersb-oauth-proxy`) 가 떠 있어야 함.
+- 기존 tabterm.json (v1, engine 필드 없음) 은 `'claude'` 로 자동 인식. 첫 touch 시 v2 로 lazy migration.
+
 ## 0.6.3 — 2026-05-22
 
 ### Added

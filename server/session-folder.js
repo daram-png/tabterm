@@ -7,8 +7,13 @@ import {
   readFile, writeFile, rename, stat, unlink, readdir,
 } from 'node:fs/promises';
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 const META_FILENAME = 'tabterm.json';
+const VALID_ENGINES = new Set(['claude', 'opencode']);
+
+function clampEngine(v) {
+  return VALID_ENGINES.has(v) ? v : 'claude';
+}
 
 function isPlainObject(v) {
   return v != null && typeof v === 'object' && !Array.isArray(v);
@@ -52,27 +57,31 @@ export async function readMeta(cwd) {
       hasTabtermJson,
       schemaVersion: null,
       label: '',
+      engine: 'claude',
       createdAt: inferredCreated,
       lastUsedAt: inferredUsed,
     };
   }
 
-  const schemaVersion = raw.version === SCHEMA_VERSION ? SCHEMA_VERSION : null;
+  // schemaVersion: accept current (2) or back-compat (1); both readable.
+  const schemaVersion = (raw.version === SCHEMA_VERSION || raw.version === 1) ? raw.version : null;
   return {
     hasTabtermJson: true,
     schemaVersion,
     label: clampLabel(raw.label),
+    engine: clampEngine(raw.engine),
     createdAt: clampTimestamp(raw.createdAt, inferredCreated),
     lastUsedAt: clampTimestamp(raw.lastUsedAt, inferredUsed),
   };
 }
 
-export async function writeMeta(cwd, { label, createdAt, lastUsedAt }) {
+export async function writeMeta(cwd, { label, engine, createdAt, lastUsedAt }) {
   const metaPath = join(cwd, META_FILENAME);
   const tmpPath = `${metaPath}.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString('hex')}`;
   const body = JSON.stringify({
     version: SCHEMA_VERSION,
     label: clampLabel(label),
+    engine: clampEngine(engine),
     createdAt: clampTimestamp(createdAt, Date.now()),
     lastUsedAt: clampTimestamp(lastUsedAt, Date.now()),
   }, null, 2);
@@ -85,20 +94,22 @@ export async function writeMeta(cwd, { label, createdAt, lastUsedAt }) {
   }
 }
 
-// 폴더에 tabterm.json 이 없으면 작성. 있으면 no-op. label 은 신규 작성 시에만 사용.
-export async function ensureMeta(cwd, { label = '' } = {}) {
+// 폴더에 tabterm.json 이 없으면 작성. 있으면 no-op. label/engine 은 신규 작성 시에만 사용.
+export async function ensureMeta(cwd, { label = '', engine = 'claude' } = {}) {
   const existing = await readMeta(cwd);
   if (existing.hasTabtermJson) return { created: false, meta: existing };
   const now = Date.now();
-  await writeMeta(cwd, { label, createdAt: now, lastUsedAt: now });
+  await writeMeta(cwd, { label, engine, createdAt: now, lastUsedAt: now });
   return { created: true, meta: await readMeta(cwd) };
 }
 
 // lastUsedAt 만 갱신. 폴더에 tabterm.json 이 없으면 lazy migration.
+// engine 은 기존 값 보존 (없으면 'claude' 로 lazy-fill).
 export async function touchLastUsed(cwd) {
   const meta = await readMeta(cwd);
   await writeMeta(cwd, {
     label: meta.label,
+    engine: meta.engine,
     createdAt: meta.createdAt,
     lastUsedAt: Date.now(),
   });
@@ -109,6 +120,7 @@ export async function setLabel(cwd, label) {
   const meta = await readMeta(cwd);
   await writeMeta(cwd, {
     label,
+    engine: meta.engine,
     createdAt: meta.createdAt,
     lastUsedAt: meta.lastUsedAt,
   });

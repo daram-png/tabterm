@@ -218,6 +218,8 @@ html, body {
   color: var(--text-2); cursor: pointer; border: 1px dashed #2a2a2a;
 }
 .sidebar-foot .ws-add:hover { background: #141414; color: var(--text); border-color: #3a3a3a; }
+.sidebar-foot .ws-add-opencode { border-color: #2a3a52; color: #8aa8d0; }
+.sidebar-foot .ws-add-opencode:hover { background: #0e1722; color: #b3cce7; border-color: #3a5278; }
 
 /* ─── main column ─── */
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; }
