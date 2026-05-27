@@ -76,7 +76,11 @@ export function registerWs(app, { auth }) {
           if (msg.type === 'resize' && Number.isInteger(msg.cols) && Number.isInteger(msg.rows)) {
             const c = Math.min(Math.max(msg.cols, 20), 400);
             const r = Math.min(Math.max(msg.rows, 8), 200);
-            session.resize(c, r);
+            // Per-client dim tracking — PTY size is min across all attached
+            // clients (PC + phone), not last-writer-wins. Prevents the
+            // dual-client glyph corruption that happened when two viewers
+            // sent conflicting fit() resizes.
+            session.updateClientDims(ws, c, r);
             return;
           }
           if (msg.type === 'signal' && msg.name === 'SIGINT') {

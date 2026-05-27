@@ -19,7 +19,20 @@ class PtySession {
     this.exitCode = null;
     this.ring = Buffer.alloc(0);
     this.ringLimit = RING_BYTES;
-    this.clients = new Set();
+    // Multi-client dim tracking. Map<WebSocket, {cols, rows} | null>.
+    // PTY can only have ONE buffer dimension at a time. With multiple clients
+    // (e.g. PC + phone viewing the same session), we'd previously last-write-
+    // wins on resize msgs → PTY flips dims constantly → both clients render
+    // corrupted because their internal xterm coord systems can't keep up.
+    // Strategy: PTY size = min(cols), min(rows) across all clients with
+    // reported dims. The smallest client constrains output width; larger
+    // clients see content in a sub-portion of their xterm (empty space on
+    // the right). No corruption. Same model tmux uses when multiple terminals
+    // attach to one window.
+    // ws → null = client connected but hasn't reported dims yet (don't
+    //              constrain min until it does).
+    // ws → {cols, rows} = client's last reported viewport size.
+    this.clients = new Map();
     this._pendingDelete = null;
     this.meta = meta || {};
   }
@@ -60,7 +73,7 @@ class PtySession {
     this.lastActivity = Date.now();
     const buf = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8');
     this._appendRing(buf);
-    for (const ws of this.clients) {
+    for (const ws of this.clients.keys()) {
       if (ws.readyState === 1) {
         try { ws.send(buf, { binary: true }); } catch {}
       }
@@ -72,7 +85,7 @@ class PtySession {
     this.exitCode = code ?? null;
     this.lastActivity = Date.now();
     const msg = JSON.stringify({ type: 'exit', code: this.exitCode });
-    for (const ws of this.clients) {
+    for (const ws of this.clients.keys()) {
       if (ws.readyState === 1) {
         try { ws.send(msg); } catch {}
       }
@@ -86,11 +99,21 @@ class PtySession {
     if (!this.alive) {
       try { ws.send(JSON.stringify({ type: 'exit', code: this.exitCode })); } catch {}
     }
-    this.clients.add(ws);
+    // Add with null dims; client will send a resize msg shortly via fit().
+    // Until then this client doesn't constrain the min-size calculation.
+    this.clients.set(ws, null);
   }
 
   detach(ws) {
+    // Guard: ws may be unknown (double close/error event from same socket).
+    // Without has() check, get(ws) === undefined, and `undefined !== null` is
+    // true → hadDims = true → spurious _recomputeSize call.
+    const hadDims = this.clients.has(ws) && this.clients.get(ws) !== null;
     this.clients.delete(ws);
+    // If the leaving client had reported dims, the constraint set shrunk —
+    // recompute since the new min might be larger (other clients can use
+    // more of their available xterm space).
+    if (hadDims) this._recomputeSize();
     if (!this.alive && this.clients.size === 0 && this._onIdle) {
       try { this._onIdle(this); } catch {}
     }
@@ -101,6 +124,39 @@ class PtySession {
     try { this.pty.write(data); } catch {}
   }
 
+  // Per-client dim update. Called from the WS resize message handler.
+  // Records this client's preferred viewport size, then recomputes the
+  // effective PTY size as min across all clients with reported dims.
+  updateClientDims(ws, cols, rows) {
+    if (!this.clients.has(ws)) return;
+    const prev = this.clients.get(ws);
+    if (prev && prev.cols === cols && prev.rows === rows) return;
+    this.clients.set(ws, { cols, rows });
+    this._recomputeSize();
+  }
+
+  // Compute min(cols), min(rows) across all clients with reported dims,
+  // and resize the PTY accordingly. No-op when no client has dims yet
+  // (the initial PTY size from spawn stays in effect).
+  _recomputeSize() {
+    if (!this.alive) return;
+    let minC = Infinity, minR = Infinity;
+    for (const dims of this.clients.values()) {
+      if (!dims) continue;
+      if (dims.cols < minC) minC = dims.cols;
+      if (dims.rows < minR) minR = dims.rows;
+    }
+    if (!isFinite(minC) || !isFinite(minR)) return;
+    if (minC === this.cols && minR === this.rows) return;
+    this.cols = minC;
+    this.rows = minR;
+    try { this.pty.resize(minC, minR); } catch {}
+  }
+
+  // Legacy direct-resize entry point. Retained so that any code path that
+  // doesn't have a ws context (e.g. an internal admin tool) can still force
+  // a PTY resize. The WS handler should use updateClientDims instead so
+  // multi-client coexistence stays consistent.
   resize(cols, rows) {
     if (!this.alive) return;
     if (cols === this.cols && rows === this.rows) return;
@@ -127,7 +183,7 @@ class PtySession {
         await this.pty.whenExited(timeoutMs);
       }
     } catch {}
-    for (const ws of this.clients) {
+    for (const ws of this.clients.keys()) {
       try { ws.close(1000, 'session-killed'); } catch {}
     }
   }
