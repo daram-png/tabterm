@@ -810,8 +810,14 @@ body.mobile .wd-modal-card {
   border-radius: 0; width: 100%; height: 100%;
 }
 
-/* xterm: bump font on small screens for readability */
-body.mobile .xterm .xterm-rows { font-size: 12px !important; }
+/*
+ * NOTE: do NOT override .xterm-rows font-size via CSS — xterm.js measures glyph
+ * width/height ONCE from term.options.fontSize and absolutely positions every
+ * cell using those metrics. A CSS font-size override desyncs the visual size
+ * from the internal grid, producing wrap/scroll/cursor misalignment and broken
+ * glyph layout. Mobile font size is set programmatically in makeTerm() +
+ * applyMobileMode() with a fit() refresh after each change.
+ */
 
 /* prevent iOS pull-to-refresh / overscroll bouncing in standalone PWA */
 body.mobile { overscroll-behavior: contain; }

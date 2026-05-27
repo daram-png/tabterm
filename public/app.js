@@ -145,7 +145,24 @@ function applyMobileMode() {
   try { syncBottomNavVisibility(); } catch {}
   // only rebuild if the mode actually changed (avoid thrashing xterm on every resize tick)
   if (prev !== mobile) {
+    // Update xterm font size on every live pane BEFORE buildLayout so the
+    // subsequent fit() (in buildLayout) measures with the correct glyph metrics.
+    // Critical: setting term.options.fontSize triggers xterm to re-measure on
+    // next refresh, but we also need fit() to recompute cols/rows for the new
+    // cell size — otherwise the buffer dimensions stay stuck on the old metrics
+    // and text wraps at the wrong column.
+    const newSize = termFontSize();
+    for (const p of state.panes) {
+      if (!p.term) continue;
+      try {
+        if (p.term.options) p.term.options.fontSize = newSize;
+        else if (typeof p.term.setOption === 'function') p.term.setOption('fontSize', newSize);  // legacy xterm <4
+      } catch (e) { console.warn('[mobile-mode] fontSize set failed', e); }
+    }
     try { buildLayout(); } catch (e) { console.error('applyMobileMode rebuild failed', e); }
+    // After buildLayout, the active visible pane has been fit. Hidden panes
+    // (mobile non-active slot) were fit-skipped intentionally; they'll get fit
+    // when the user taps their slot-chip and buildLayout re-runs.
   }
 }
 function scheduleApplyMobileMode() {
@@ -959,10 +976,19 @@ function renderSlotStrip() {
 }
 
 /* ---------- terminal ---------- */
+// Mobile uses 12px for tighter horizontal density on narrow viewports; desktop
+// stays at 13px. We MUST set this via term.options (not CSS) because xterm
+// measures glyph dimensions once at init/fit time — a CSS-only override desyncs
+// the rendered text from the internal cell grid (broken wrap, scroll, cursor).
+// applyMobileMode() updates this live + refits when the mode flips.
+const TERM_FONT_DESKTOP = 13;
+const TERM_FONT_MOBILE = 12;
+function termFontSize() { return isMobile() ? TERM_FONT_MOBILE : TERM_FONT_DESKTOP; }
+
 function makeTerm() {
   const term = new Terminal({
     fontFamily: '"Geist Mono", ui-monospace, "Cascadia Mono", Consolas, monospace',
-    fontSize: 13,
+    fontSize: termFontSize(),
     lineHeight: 1.2,
     theme: {
       background: '#0a0a0a', foreground: '#ededed', cursor: '#5b8ef7', cursorAccent: '#0a0a0a',
@@ -1163,8 +1189,18 @@ function focusActivePane(pane) {
 
 function fitPane(p) {
   if (!p?.fit || !p.cellEl?.isConnected) return;
+  // Skip fit on a hidden host — fit measures via getBoundingClientRect, which
+  // returns 0 on display:none. Mobile non-active slot is intentionally hidden;
+  // it will get fit when the user taps its slot-chip and buildLayout re-runs.
+  if (p.cellEl.style.display === 'none') return;
   try { p.fit.fit(); } catch {}
   const { cols, rows } = p.term;
+  // Defensive redraw after fit. fit.fit() only triggers resize() when cols/rows
+  // change; if only fontSize changed (mode flip with identical cell count),
+  // xterm may not repaint the existing buffer with the new glyph metrics until
+  // the next input. Explicit refresh forces every cell to redraw at the new
+  // size. Cheap (one frame) and prevents stale-glyph flicker on mode change.
+  try { p.term.refresh?.(0, Math.max(0, rows - 1)); } catch {}
   sendWs(p, { type: 'resize', cols, rows });
 }
 

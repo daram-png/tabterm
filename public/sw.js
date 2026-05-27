@@ -1,4 +1,4 @@
-const VERSION = 'tabterm-v26-mobile-shell-phase2';
+const VERSION = 'tabterm-v27-mobile-font-fix';
 const SHELL = [
   '/',
   '/index.html',
