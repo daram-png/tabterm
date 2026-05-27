@@ -129,6 +129,53 @@ const state = {
 const MOBILE_MQ = window.matchMedia('(max-width: 720px)');
 function isMobile() { return MOBILE_MQ.matches; }
 
+/* Measure the actual rendered heights of mobile bottom-anchored fixed elements
+ * (bottom-nav + ime-bar) and publish a CSS var --mobile-bottom-reserve. The
+ * workspace's padding-bottom keys off this var so terminal content always lines
+ * up against the top of the bottom-nav with no dead space, regardless of:
+ *   - whether ime-bar is shown (ios-ime class)
+ *   - safe-area-inset-bottom (home indicator presence)
+ *   - keyboard offset (visualViewport changes when iOS keyboard opens)
+ *   - dynamic ime-bar height (e.g., multi-row keyboard or hidden rows)
+ *
+ * Called on: init, applyMobileMode (mode flip), resize, visualViewport change,
+ * and after ios-ime class toggle. Uses rAF to coalesce calls within a frame.
+ */
+let _bottomReserveRaf = 0;
+function updateMobileBottomReserve() {
+  if (_bottomReserveRaf) return;
+  _bottomReserveRaf = requestAnimationFrame(() => {
+    _bottomReserveRaf = 0;
+    if (!document.body.classList.contains('mobile')) {
+      // desktop: clear the var so workspace falls back to its default (0).
+      document.documentElement.style.removeProperty('--mobile-bottom-reserve');
+      return;
+    }
+    let reserve = 0;
+    const nav = document.getElementById('bottom-nav');
+    if (nav && !nav.hidden) reserve += nav.offsetHeight;
+    const imeBar = document.getElementById('ime-bar');
+    // ime-bar `display: none` by default, becomes `flex` via body.ios-ime. We
+    // measure offsetHeight only when ios-ime is active so a 0-height layout
+    // (display:none) doesn't pollute the reserve.
+    if (imeBar && document.body.classList.contains('ios-ime')) {
+      reserve += imeBar.offsetHeight;
+    }
+    if (reserve > 0) {
+      document.documentElement.style.setProperty('--mobile-bottom-reserve', `${reserve}px`);
+    } else {
+      document.documentElement.style.removeProperty('--mobile-bottom-reserve');
+    }
+    // After reserve change, the workspace content area resizes — refit every
+    // visible pane so xterm cols/rows track the new content height.
+    try {
+      for (const p of state.panes) {
+        if (p?.cellEl && p.cellEl.style.display !== 'none') fitPane(p);
+      }
+    } catch (e) { console.warn('[bottom-reserve] post-refit failed', e); }
+  });
+}
+
 let _applyMobileModeRaf = 0;
 function applyMobileMode() {
   const mobile = isMobile();
@@ -143,6 +190,9 @@ function applyMobileMode() {
   }
   // Phase 2: sync bottom-nav visibility on every mode change.
   try { syncBottomNavVisibility(); } catch {}
+  // Recompute bottom reserve whenever mode or layout changes affect which
+  // fixed-bottom elements are visible.
+  updateMobileBottomReserve();
   // only rebuild if the mode actually changed (avoid thrashing xterm on every resize tick)
   if (prev !== mobile) {
     // Update xterm font size on every live pane BEFORE buildLayout so the
@@ -1960,6 +2010,17 @@ async function init() {
   initBottomNav();
   initSwipeGesture();
   renderWsStatus();
+
+  // Measure bottom reserve AFTER bottom-nav visibility sync + ime-bar init have
+  // run, so heights are real. Also re-measure on resize + visualViewport changes
+  // (iOS keyboard open/close changes the visual viewport, which can shift the
+  // ime-bar/bottom-nav effective y positions).
+  updateMobileBottomReserve();
+  window.addEventListener('resize', updateMobileBottomReserve);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', updateMobileBottomReserve);
+    window.visualViewport.addEventListener('scroll', updateMobileBottomReserve);
+  }
 }
 
 /* ---------- bottom nav (mobile-only) ---------- */

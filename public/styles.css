@@ -795,9 +795,14 @@ body.mobile .pane[data-mobile-hidden="true"] { display: none !important; }
 body.mobile .session-header { height: 42px; padding: 0 8px; gap: 8px; }
 body.mobile .session-tools .btn { width: 30px; height: 30px; }
 
-/* ime-bar already handles safe-area-inset-bottom — make sure it sits above home indicator */
+/* ime-bar must dock ABOVE the bottom-nav on mobile. Without this override, the
+   desktop default `bottom: safe-bottom` puts ime-bar at the same y as bottom-nav,
+   with bottom-nav (z-index 1080) covering the textarea row (z-index 200). User
+   can't see the IME textarea / send button → effectively no Hangul input on phone.
+   bottom-nav owns the safe-area-inset-bottom; ime-bar just sits on top of it. */
 body.mobile .ime-bar {
-  padding-bottom: max(8px, var(--safe-bottom));
+  bottom: calc(56px + env(safe-area-inset-bottom, 0px) + var(--kbd-offset, 0px));
+  padding-bottom: 6px;
 }
 
 /* fx-modal / wd-modal in mobile: full-screen for better touch */
@@ -839,16 +844,14 @@ body:not(.mobile) .bottom-sheet { display: none !important; }
    moves to the bottom nav for thumb reachability. */
 body.mobile .toolbar { display: none; }
 
-/* leave room above bottom nav so workspace content (or 0-pane empty state)
-   doesn't sit under the nav bar. height = 56px nav + safe-area bottom. */
-body.mobile .workspace { padding-bottom: calc(56px + var(--safe-bottom)); }
-
-/* if ime-bar is active (iOS-like), it docks ABOVE the bottom nav.
-   the existing body.ios-ime padding-bottom on .workspace would conflict
-   with our padding-bottom: override by stacking explicitly. */
-body.mobile.ios-ime .workspace {
-  padding-bottom: calc(120px + 56px + var(--safe-bottom));
-}
+/* Workspace bottom reserve is computed at runtime by updateMobileBottomReserve()
+   based on the ACTUAL rendered heights of bottom-nav and ime-bar (if visible).
+   Previous static value (calc(120px + 56px + safe)) was both:
+     (a) overcounting because ime-bar overlapped bottom-nav (visible gap), and
+     (b) imprecise because ime-bar's effective height varies with safe-area /
+         keyboard offset / which rows are shown.
+   The CSS var fallback is a reasonable initial guess until JS measures. */
+body.mobile .workspace { padding-bottom: var(--mobile-bottom-reserve, calc(56px + var(--safe-bottom))); }
 
 /* ─── bottom nav (5-tab fixed bar) ─── */
 .bottom-nav {
