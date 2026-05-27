@@ -2,13 +2,28 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { stat, readFile } from 'node:fs/promises';
 
-const AUTOSTART = String(process.env.WATCHDOG_AUTOSTART ?? 'true') === 'true';
-const SCRIPT_PATH = process.env.WATCHDOG_PATH || 'C:/workspace/watchdog/watchdog.js';
-const CONFIG_PATH = process.env.WATCHDOG_CONFIG || 'C:/workspace/watchdog/config-ccx-full.json';
-const LOG_PATH = process.env.WATCHDOG_LOG || 'C:/workspace/watchdog/watchdog.log';
+// Env-derived values are read lazily inside startWatchdog (and via the
+// helpers below) because this module is imported BEFORE index.js calls
+// dotenv.config(). Capturing them at module-evaluation time would freeze
+// them at the pre-dotenv default and silently ignore .env overrides like
+// WATCHDOG_AUTOSTART=false. That bug spawned a watchdog that pops visible
+// cmd.exe windows for every revived subagent.
 const HEALTHY_MAX_AGE_MS = 90_000;
 const DEGRADED_MAX_AGE_MS = 600_000;
 const TAIL_MAX_LINES = 500;
+
+function envAutostart() {
+  return String(process.env.WATCHDOG_AUTOSTART ?? 'true') === 'true';
+}
+function envScriptPath() {
+  return process.env.WATCHDOG_PATH || 'C:/workspace/watchdog/watchdog.js';
+}
+function envConfigPath() {
+  return process.env.WATCHDOG_CONFIG || 'C:/workspace/watchdog/config-ccx-full.json';
+}
+function envLogPath() {
+  return process.env.WATCHDOG_LOG || 'C:/workspace/watchdog/watchdog.log';
+}
 
 let wdProc = null;
 let wdStartedAt = 0;
@@ -16,6 +31,10 @@ let wdLastExitCode = null;
 let wdLastError = null;
 
 export async function startWatchdog(log) {
+  const AUTOSTART = envAutostart();
+  const SCRIPT_PATH = envScriptPath();
+  const CONFIG_PATH = envConfigPath();
+  const LOG_PATH = envLogPath();
   if (!AUTOSTART) {
     log.info('[watchdog] WATCHDOG_AUTOSTART=false — skipping spawn');
     return { spawned: false, reason: 'autostart-disabled' };

@@ -5,11 +5,16 @@ import fastifyCookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
 import fastifyRateLimit from '@fastify/rate-limit';
 import fastifyWebsocket from '@fastify/websocket';
+import fastifyMultipart from '@fastify/multipart';
 import { resolve, dirname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 import { auth } from './auth.js';
 import { sessions } from './sessions.js';
@@ -32,6 +37,19 @@ import {
   listDirectory as fxListDirectory,
   readTextFile as fxReadTextFile,
   streamPreview as fxStreamPreview,
+  listDirectoryAbsolute as fxListAbs,
+  readTextFileAbsolute as fxReadAbs,
+  streamPreviewAbsolute as fxStreamAbs,
+  mkdirEntry as fxMkdir,
+  deleteEntry as fxDelete,
+  renameEntry as fxRename,
+  writeTextFile as fxWriteText,
+  writeUpload as fxWriteUpload,
+  mkdirEntryAbsolute as fxMkdirAbs,
+  deleteEntryAbsolute as fxDeleteAbs,
+  renameEntryAbsolute as fxRenameAbs,
+  writeTextFileAbsolute as fxWriteTextAbs,
+  writeUploadAbsolute as fxWriteUploadAbs,
 } from './file-explorer.js';
 import { startWatchdog, stopWatchdog } from './watchdog.js';
 import { registerSystemRoutes } from './system.js';
@@ -51,11 +69,15 @@ const NEW_SESSION_PREFIX = process.env.NEW_SESSION_PREFIX || 'session-';
 const FILE_LIST_MAX_ENTRIES = Number(process.env.FILE_LIST_MAX_ENTRIES || 2000);
 const FILE_TEXT_MAX_BYTES = Number(process.env.FILE_TEXT_MAX_BYTES || 1048576);
 const FILE_PREVIEW_MAX_BYTES = Number(process.env.FILE_PREVIEW_MAX_BYTES || 52428800);
+const FILE_WRITE_MAX_BYTES = Number(process.env.FILE_WRITE_MAX_BYTES || 5242880); // 5MB text save cap
+const FILE_UPLOAD_MAX_BYTES = Number(process.env.FILE_UPLOAD_MAX_BYTES || 104857600); // 100MB drop cap
 
 // On Windows, even after pty.kill() and onExit fire, descendant processes
 // or antivirus/indexers can transiently hold the cwd. Retry rm with
 // exponential backoff on EBUSY / EPERM / ENOTEMPTY.
-async function rmWithRetry(path, opts, { attempts = 5, baseDelayMs = 50 } = {}) {
+// 8 attempts × 100ms base = 100+200+400+800+1600+3200+6400+12800 ≈ 25.5s total
+// covering OneDrive/Defender scan windows and slow ConPTY teardown on Windows.
+async function rmWithRetry(path, opts, { attempts = 8, baseDelayMs = 100 } = {}) {
   let lastErr;
   for (let i = 0; i < attempts; i++) {
     try {
@@ -70,6 +92,24 @@ async function rmWithRetry(path, opts, { attempts = 5, baseDelayMs = 50 } = {}) 
     }
   }
   throw lastErr;
+}
+
+// Force-kill the entire process tree rooted at pid using Windows taskkill.
+// /F = force, /T = tree (including all child processes). Used before rm -rf
+// on a session cwd to evict any descendant cmd/shell/editor/claude processes
+// that outlived ConPTY teardown and would otherwise hold file handles.
+// Best-effort: taskkill exit code 128 = "no such process" (already gone),
+// which is the success case for us. All errors are swallowed and logged.
+async function taskkillTree(pid, log) {
+  if (!pid) return;
+  try {
+    await execFileAsync('taskkill.exe', ['/F', '/T', '/PID', String(pid)], { windowsHide: true });
+  } catch (e) {
+    // Code 128 = process not found (already exited). That's fine.
+    if (e?.code !== 128 && log) {
+      log.warn({ err: e?.message, pid }, '[folder-delete] taskkill tree non-fatal');
+    }
+  }
 }
 
 function preflight() {
@@ -91,6 +131,9 @@ const app = Fastify({
 await app.register(fastifyCookie, { secret: COOKIE_SECRET });
 await app.register(fastifyRateLimit, { global: false });
 await app.register(fastifyWebsocket);
+await app.register(fastifyMultipart, {
+  limits: { fileSize: FILE_UPLOAD_MAX_BYTES, files: 1, fieldSize: 64 * 1024 },
+});
 
 app.addHook('onSend', (req, reply, payload, done) => {
   reply.header('X-Content-Type-Options', 'nosniff');
@@ -640,17 +683,29 @@ app.delete('/api/sessions/folders/:name', async (req, reply) => {
   }
   if (!existsSync(cwd)) return reply.code(404).send({ error: 'folder-not-found' });
 
-  // 1) alive PTY kill (동일 cwd 의 session kind) — await onExit before rm
-  //    so Windows releases ConPTY/shell handles on cwd. See rmWithRetry below
-  //    for the backoff that catches descendant processes / AV holding handles.
+  // 1) Snapshot PTY pids BEFORE kill — sessions.kill removes the session from
+  //    the map, so we can't query pty.pid afterwards. Needed for step 2.
   const matched = sessions.list().filter((s) => s.kind === 'session' && s.cwd === cwd && s.alive);
+  const ptyPids = matched
+    .map((s) => sessions.getPtyPid(s.id))
+    .filter((p) => p != null);
+
+  // 2) Graceful kill via sessions.kill (awaits ConPTY onExit). Closes most
+  //    handles cleanly. Step 3 catches the descendants that don't.
   await Promise.all(matched.map((s) => sessions.kill(s.id)));
 
-  // 2) 폴더 자체 rm -rf, with EBUSY/EPERM/ENOTEMPTY retry
+  // 3) Force taskkill /F /T on each PTY's full process tree. ConPTY teardown
+  //    can leave orphaned shell descendants (vim, tail, claude.exe etc) that
+  //    hold file handles on cwd. Running taskkill AFTER sessions.kill is fine
+  //    even though the parent pid may already be dead — Windows still tracks
+  //    the tree by parent pid until the system reaps it.
+  await Promise.all(ptyPids.map((pid) => taskkillTree(pid, app.log)));
+
+  // 4) 폴더 자체 rm -rf, with EBUSY/EPERM/ENOTEMPTY retry (~25s total budget)
   try {
     await rmWithRetry(cwd, { recursive: true, force: true });
   } catch (e) {
-    app.log.error({ err: e?.message, cwd }, '[folder-delete] rm failed');
+    app.log.error({ err: e?.message, cwd, ptyPids }, '[folder-delete] rm failed');
     audit.log({ event: 'session.folder.delete.failed', cwd, err: String(e?.message || e), ip: req.ip });
     return reply.code(500).send({ error: 'rm-failed', message: String(e?.message || e) });
   }
@@ -729,6 +784,302 @@ app.get('/api/sessions/folders/:name/fs/preview', async (req, reply) => {
     return await fxStreamPreview(cwd, req.query?.path ?? '', reply, {
       maxBytes: FILE_PREVIEW_MAX_BYTES,
     });
+  } catch (e) {
+    return sendFileExplorerError(reply, e, app.log);
+  }
+});
+
+// Phase 2 jailed write routes — all auth+CSRF gated. fxMkdir/fxDelete/fxRename
+// reuse the same resolveSafePath jail as the read routes, so symlink-out and
+// path-traversal vectors are covered identically.
+
+app.post('/api/sessions/folders/:name/fs/mkdir', { bodyLimit: 4096 }, async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  if (!requireCsrf(req, reply)) return;
+  const cwd = resolveSessionCwd(req, reply);
+  if (!cwd) return;
+  const path = req.body?.path;
+  if (typeof path !== 'string') return reply.code(400).send({ error: 'missing-path' });
+  try {
+    const entry = await fxMkdir(cwd, path);
+    audit.log({ event: 'fs.mkdir', cwd, path, ip: req.ip });
+    return { ok: true, entry };
+  } catch (e) {
+    return sendFileExplorerError(reply, e, app.log);
+  }
+});
+
+app.delete('/api/sessions/folders/:name/fs/entry', async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  if (!requireCsrf(req, reply)) return;
+  const cwd = resolveSessionCwd(req, reply);
+  if (!cwd) return;
+  const path = req.query?.path;
+  if (typeof path !== 'string' || path === '') return reply.code(400).send({ error: 'missing-path' });
+  const recursive = req.query?.recursive === 'true';
+  try {
+    const r = await fxDelete(cwd, path, { recursive });
+    audit.log({ event: 'fs.delete', cwd, path, recursive, ip: req.ip });
+    return { ok: true, ...r };
+  } catch (e) {
+    return sendFileExplorerError(reply, e, app.log);
+  }
+});
+
+app.patch('/api/sessions/folders/:name/fs/rename', { bodyLimit: 8192 }, async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  if (!requireCsrf(req, reply)) return;
+  const cwd = resolveSessionCwd(req, reply);
+  if (!cwd) return;
+  const { from, to, overwrite } = req.body || {};
+  if (typeof from !== 'string' || typeof to !== 'string') {
+    return reply.code(400).send({ error: 'missing-from-or-to' });
+  }
+  try {
+    const entry = await fxRename(cwd, from, to, { overwrite: overwrite === true });
+    audit.log({ event: 'fs.rename', cwd, from, to, ip: req.ip });
+    return { ok: true, entry };
+  } catch (e) {
+    return sendFileExplorerError(reply, e, app.log);
+  }
+});
+
+app.put('/api/sessions/folders/:name/fs/write', { bodyLimit: FILE_WRITE_MAX_BYTES + 8192 }, async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  if (!requireCsrf(req, reply)) return;
+  const cwd = resolveSessionCwd(req, reply);
+  if (!cwd) return;
+  const { path, content, expectedVersion, createIfMissing } = req.body || {};
+  if (typeof path !== 'string') return reply.code(400).send({ error: 'missing-path' });
+  if (typeof content !== 'string') return reply.code(400).send({ error: 'bad-content' });
+  if (Buffer.byteLength(content, 'utf8') > FILE_WRITE_MAX_BYTES) {
+    return reply.code(413).send({ error: 'too-large' });
+  }
+  try {
+    const entry = await fxWriteText(cwd, path, content, {
+      expectedVersion: expectedVersion || null,
+      createIfMissing: createIfMissing === true,
+    });
+    audit.log({ event: 'fs.write', cwd, path, bytes: entry.version?.size, ip: req.ip });
+    return { ok: true, entry };
+  } catch (e) {
+    return sendFileExplorerError(reply, e, app.log);
+  }
+});
+
+// Multipart upload — single "file" part. Client sends ?dir=<relDir> (default '')
+// and the part's filename becomes the leaf. autosuffix=true picks "name (1).ext"
+// on collision instead of erroring (Telegram-drop style — never silent overwrite).
+app.post('/api/sessions/folders/:name/fs/upload', async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  if (!requireCsrf(req, reply)) return;
+  const cwd = resolveSessionCwd(req, reply);
+  if (!cwd) return;
+  if (!req.isMultipart()) return reply.code(400).send({ error: 'expect-multipart' });
+
+  const dir = typeof req.query?.dir === 'string' ? req.query.dir : '';
+  const autosuffix = req.query?.autosuffix !== 'false';
+  const overwrite = req.query?.overwrite === 'true';
+
+  let data;
+  try {
+    data = await req.file();
+  } catch (e) {
+    return reply.code(400).send({ error: 'multipart-parse-failed', message: String(e?.message || e) });
+  }
+  if (!data) return reply.code(400).send({ error: 'no-file-part' });
+
+  const filename = sanitizeUploadName(data.filename);
+  if (!filename) return reply.code(400).send({ error: 'bad-filename' });
+  const relPath = dir ? `${dir.replace(/\/+$/, '')}/${filename}` : filename;
+
+  try {
+    const entry = await fxWriteUpload(cwd, relPath, data.file, {
+      autosuffix, overwrite,
+      maxBytes: FILE_UPLOAD_MAX_BYTES,
+    });
+    audit.log({ event: 'fs.upload', cwd, path: relPath, bytes: entry.bytesWritten, ip: req.ip });
+    return { ok: true, entry };
+  } catch (e) {
+    return sendFileExplorerError(reply, e, app.log);
+  }
+});
+
+// Posix-only basename — strip any directory separators a client might inject
+// via the multipart filename field. The leaf still goes through validateRelPath
+// (via writeUpload → resolveSafePath) so the only thing this guard does is
+// reject filenames that BEGIN with traversal characters before they get there.
+function sanitizeUploadName(raw) {
+  if (typeof raw !== 'string' || !raw) return '';
+  const base = raw.replace(/[\\/]+/g, '_').replace(/^\.+/, '');
+  if (!base || base.length > 255) return '';
+  return base;
+}
+
+// Global filesystem explorer (auth-only, no folder jail). Powers the sidebar
+// "Explorer" tab so users can browse anywhere their OS user can read.
+async function listDrivesWindows() {
+  try {
+    const { stdout } = await execFileAsync(
+      'wmic.exe',
+      ['logicaldisk', 'get', 'caption,drivetype'],
+      { windowsHide: true },
+    );
+    const out = [];
+    for (const line of stdout.split(/\r?\n/)) {
+      const m = line.match(/^([A-Z]):\s+(\d+)/);
+      if (!m) continue;
+      const letter = m[1];
+      const type = Number(m[2]);
+      if (type === 0 || type === 5) continue;
+      out.push(`${letter}:/`);
+    }
+    if (out.length === 0) out.push('C:/');
+    return out;
+  } catch {
+    return ['C:/'];
+  }
+}
+
+app.get('/api/fs/drives', async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  const drives = process.platform === 'win32' ? await listDrivesWindows() : ['/'];
+  return { drives };
+});
+
+app.get('/api/fs/list', async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  const path = req.query?.path;
+  if (!path) return reply.code(400).send({ error: 'missing-path' });
+  try {
+    return await fxListAbs(path, { maxEntries: FILE_LIST_MAX_ENTRIES });
+  } catch (e) {
+    return sendFileExplorerError(reply, e, app.log);
+  }
+});
+
+app.get('/api/fs/read', async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  const path = req.query?.path;
+  if (!path) return reply.code(400).send({ error: 'missing-path' });
+  try {
+    return await fxReadAbs(path, { maxBytes: FILE_TEXT_MAX_BYTES });
+  } catch (e) {
+    return sendFileExplorerError(reply, e, app.log);
+  }
+});
+
+app.get('/api/fs/preview', async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  const path = req.query?.path;
+  if (!path) return reply.code(400).send({ error: 'missing-path' });
+  try {
+    return await fxStreamAbs(path, reply, { maxBytes: FILE_PREVIEW_MAX_BYTES });
+  } catch (e) {
+    return sendFileExplorerError(reply, e, app.log);
+  }
+});
+
+// Phase 2 absolute write routes — auth+CSRF gated, no folder jail.
+// Mirror the jailed routes but accept absolute paths (Windows drive-letter or
+// posix root). Powers global Explorer tab actions + terminal drag-drop into
+// session cwd (which can be a subagent dir, outside any jail).
+
+app.post('/api/fs/mkdir', { bodyLimit: 8192 }, async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  if (!requireCsrf(req, reply)) return;
+  const path = req.body?.path;
+  if (typeof path !== 'string') return reply.code(400).send({ error: 'missing-path' });
+  try {
+    const entry = await fxMkdirAbs(path);
+    audit.log({ event: 'fs.mkdir.abs', path, ip: req.ip });
+    return { ok: true, entry };
+  } catch (e) {
+    return sendFileExplorerError(reply, e, app.log);
+  }
+});
+
+app.delete('/api/fs/entry', async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  if (!requireCsrf(req, reply)) return;
+  const path = req.query?.path;
+  if (!path) return reply.code(400).send({ error: 'missing-path' });
+  const recursive = req.query?.recursive === 'true';
+  try {
+    const r = await fxDeleteAbs(path, { recursive });
+    audit.log({ event: 'fs.delete.abs', path, recursive, ip: req.ip });
+    return { ok: true, ...r };
+  } catch (e) {
+    return sendFileExplorerError(reply, e, app.log);
+  }
+});
+
+app.patch('/api/fs/rename', { bodyLimit: 16384 }, async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  if (!requireCsrf(req, reply)) return;
+  const { from, to, overwrite } = req.body || {};
+  if (typeof from !== 'string' || typeof to !== 'string') {
+    return reply.code(400).send({ error: 'missing-from-or-to' });
+  }
+  try {
+    const entry = await fxRenameAbs(from, to, { overwrite: overwrite === true });
+    audit.log({ event: 'fs.rename.abs', from, to, ip: req.ip });
+    return { ok: true, entry };
+  } catch (e) {
+    return sendFileExplorerError(reply, e, app.log);
+  }
+});
+
+app.put('/api/fs/write', { bodyLimit: FILE_WRITE_MAX_BYTES + 8192 }, async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  if (!requireCsrf(req, reply)) return;
+  const { path, content, expectedVersion, createIfMissing } = req.body || {};
+  if (typeof path !== 'string') return reply.code(400).send({ error: 'missing-path' });
+  if (typeof content !== 'string') return reply.code(400).send({ error: 'bad-content' });
+  if (Buffer.byteLength(content, 'utf8') > FILE_WRITE_MAX_BYTES) {
+    return reply.code(413).send({ error: 'too-large' });
+  }
+  try {
+    const entry = await fxWriteTextAbs(path, content, {
+      expectedVersion: expectedVersion || null,
+      createIfMissing: createIfMissing === true,
+    });
+    audit.log({ event: 'fs.write.abs', path, bytes: entry.version?.size, ip: req.ip });
+    return { ok: true, entry };
+  } catch (e) {
+    return sendFileExplorerError(reply, e, app.log);
+  }
+});
+
+app.post('/api/fs/upload', async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  if (!requireCsrf(req, reply)) return;
+  if (!req.isMultipart()) return reply.code(400).send({ error: 'expect-multipart' });
+
+  const dir = typeof req.query?.dir === 'string' ? req.query.dir : '';
+  if (!dir) return reply.code(400).send({ error: 'missing-dir' });
+  const autosuffix = req.query?.autosuffix !== 'false';
+  const overwrite = req.query?.overwrite === 'true';
+
+  let data;
+  try {
+    data = await req.file();
+  } catch (e) {
+    return reply.code(400).send({ error: 'multipart-parse-failed', message: String(e?.message || e) });
+  }
+  if (!data) return reply.code(400).send({ error: 'no-file-part' });
+
+  const filename = sanitizeUploadName(data.filename);
+  if (!filename) return reply.code(400).send({ error: 'bad-filename' });
+  const targetAbs = resolve(dir, filename);
+
+  try {
+    const entry = await fxWriteUploadAbs(targetAbs, data.file, {
+      autosuffix, overwrite,
+      maxBytes: FILE_UPLOAD_MAX_BYTES,
+    });
+    audit.log({ event: 'fs.upload.abs', path: targetAbs, bytes: entry.bytesWritten, ip: req.ip });
+    return { ok: true, entry };
   } catch (e) {
     return sendFileExplorerError(reply, e, app.log);
   }

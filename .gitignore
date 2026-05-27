@@ -8,3 +8,4 @@ data/labels.json.corrupted-*
 .env
 public/vendor/
 logs/
+backups-*/

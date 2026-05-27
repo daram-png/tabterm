@@ -1,4 +1,4 @@
-const VERSION = 'tabterm-v21-file-explorer-phase1';
+const VERSION = 'tabterm-v24-fs-mutations-and-drop-upload';
 const SHELL = [
   '/',
   '/index.html',

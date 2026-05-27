@@ -134,11 +134,15 @@ function slotOfPane(id) {
 }
 function displayName(p) {
   if (!p) return '';
-  if (p.kind === 'worker') {
-    const custom = state.workerLabels[p.workerIndex];
+  if (p.kind === 'subagent') {
+    const custom = state.subagentLabels[p.subagentIndex];
     return custom || p.label;
   }
+  if (p.kind === 'file') return p.fileName;
   return p.label;
+}
+function paneByFilePath(absPath) {
+  return state.panes.find((p) => p.kind === 'file' && p.filePath === absPath);
 }
 
 /* ---------- inline rename ---------- */
@@ -547,14 +551,6 @@ function openKebabMenu(folder, pane, anchorEl) {
     await killSessionFolder(pane.id);
   });
 
-  const filesBtn = document.createElement('button');
-  filesBtn.className = 'ws-kebab-item';
-  filesBtn.textContent = 'Open files…';
-  filesBtn.addEventListener('click', () => {
-    closeKebabMenu();
-    openFileExplorer(folder);
-  });
-
   const delBtn = document.createElement('button');
   delBtn.className = 'ws-kebab-item danger';
   delBtn.textContent = 'Delete folder…';
@@ -564,7 +560,6 @@ function openKebabMenu(folder, pane, anchorEl) {
   });
 
   menu.appendChild(killBtn);
-  menu.appendChild(filesBtn);
   menu.appendChild(delBtn);
   document.body.appendChild(menu);
   state.kebabMenu = menu;
@@ -717,13 +712,37 @@ function makeTerm() {
 }
 
 function paneHtml(p, slotLabel) {
+  if (p.kind === 'file') {
+    const kindLabel = p.contentKind === 'text' ? (p.language || 'text') : p.contentKind || 'file';
+    return `
+      <div class="pane-focus-bar"></div>
+      <div class="session-header">
+        <div class="session-icon file-icon">${fileIconSvg(32)}</div>
+        <div class="session-meta">
+          <div class="session-name">${escapeHtml(displayName(p))} <span class="ver">${slotLabel}</span></div>
+          <div class="session-sub">${escapeHtml(kindLabel)}<span class="sep">·</span><span class="session-path">${escapeHtml(p.filePath || '')}</span></div>
+        </div>
+        <div class="session-tools">
+          <div class="btn" title="Close file" data-act="close">✕</div>
+        </div>
+      </div>
+      <div class="file-body"></div>
+      <div class="statusbar">
+        <span class="sb-path">${escapeHtml(p.filePath || '')}</span>
+        <span class="pipe">|</span>
+        <span class="sb-model">${escapeHtml(kindLabel)} · read-only</span>
+        <span class="sb-spacer"></span>
+        <span class="sb-right">${p.loading ? 'loading…' : (p.error ? 'error' : 'loaded')}</span>
+      </div>
+    `;
+  }
   return `
     <div class="pane-focus-bar"></div>
     <div class="session-header">
       <div class="session-icon">${claudeMascotSvg(32)}</div>
       <div class="session-meta">
         <div class="session-name">${escapeHtml(displayName(p))} <span class="ver">${slotLabel}</span></div>
-        <div class="session-sub">${p.kind === 'worker' ? 'ccx hybrid' : 'general session'}<span class="sep">·</span><span class="session-path">${escapeHtml(p.cwd || '')}</span></div>
+        <div class="session-sub">${p.kind === 'subagent' ? 'ccx hybrid' : 'general session'}<span class="sep">·</span><span class="session-path">${escapeHtml(p.cwd || '')}</span></div>
       </div>
       <div class="session-tools">
         <div class="btn" title="Soft stop (Ctrl+C)" data-act="soft">⏸</div>
@@ -736,11 +755,15 @@ function paneHtml(p, slotLabel) {
     <div class="statusbar">
       <span class="sb-path">${escapeHtml(p.cwd || '')}</span>
       <span class="pipe">|</span>
-      <span class="sb-model">${p.kind === 'worker' ? 'ccx · Opus 4.7' : 'general'}</span>
+      <span class="sb-model">${p.kind === 'subagent' ? 'ccx · Opus 4.7' : 'general'}</span>
       <span class="sb-spacer"></span>
       <span class="sb-right"><span class="dot ${p.dead ? 'dead' : ''}"></span>${p.dead ? `exit ${p.exitCode ?? '?'}` : 'attached'}</span>
     </div>
   `;
+}
+
+function fileIconSvg(size) {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" stroke="#9ca3af" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2 H10 L13 5 V14 H4 Z"/><path d="M10 2 V5 H13"/><path d="M6 8 H11 M6 10.5 H11 M6 13 H9"/></svg>`;
 }
 
 function pencilSvg() {
@@ -813,6 +836,10 @@ function buildLayout() {
   }
 
   for (const { pane } of filled) {
+    if (pane.kind === 'file') {
+      renderFilePaneBody(pane);
+      continue;
+    }
     const host = pane.cellEl.querySelector('.terminal');
     if (!pane.term._opened) { pane.term.open(host); pane.term._opened = true; }
     else { host.appendChild(pane.term.element); }
@@ -910,13 +937,142 @@ function addPaneFromServer(session) {
 async function closePane(id) {
   const p = paneById(id);
   if (!p) return;
-  try { p.ws?.close(); } catch {}
-  try { await api(`/api/sessions/${id}`, { method: 'DELETE' }); } catch {}
+  if (p.kind === 'file') {
+    if (p.previewUrl) { try { URL.revokeObjectURL(p.previewUrl); } catch {} }
+  } else {
+    try { p.ws?.close(); } catch {}
+    try { await api(`/api/sessions/${id}`, { method: 'DELETE' }); } catch {}
+  }
   detachFromSlots(id);
   state.panes = state.panes.filter((x) => x.id !== id);
   buildLayout();
   renderSidebar();
   renderSlotStrip();
+}
+
+async function openFileInSlot(entry) {
+  if (!entry || entry.kind === 'directory') return;
+  if (entry.kind !== 'file') {
+    const reason = entry.isBroken ? 'broken symlink' : `not a regular file (${entry.kind})`;
+    toast(`${entry.name}: ${reason}`, 'err');
+    return;
+  }
+  const existing = paneByFilePath(entry.path);
+  if (existing) {
+    const slot = slotOfPane(existing.id);
+    if (slot >= 0) {
+      state.activeSlot = slot;
+      renderSidebar();
+      renderSlotStrip();
+      return;
+    }
+    assignToSlot(existing.id);
+    return;
+  }
+  const isText = !!entry.editable;
+  const isPreview = !isText && entry.previewKind && entry.previewKind !== 'none';
+  if (!isText && !isPreview) {
+    toast(`${entry.name}: binary file not previewable`, 'err');
+    return;
+  }
+  const p = {
+    id: `file:${(crypto.randomUUID?.() || String(Date.now()) + Math.random().toString(16).slice(2))}`,
+    kind: 'file',
+    filePath: entry.path,
+    fileName: entry.name,
+    contentKind: isText ? 'text' : entry.previewKind,
+    content: null,
+    previewUrl: null,
+    language: null,
+    error: null,
+    loading: true,
+    cellEl: null,
+  };
+  state.panes.push(p);
+  const target = state.slotCursor;
+  const evictedId = state.slots[target];
+  state.slots[target] = p.id;
+  state.activeSlot = target;
+  state.slotCursor = (state.slotCursor + 1) % 2;
+  if (evictedId) {
+    const evicted = paneById(evictedId);
+    if (evicted?.kind === 'file') {
+      if (evicted.previewUrl) { try { URL.revokeObjectURL(evicted.previewUrl); } catch {} }
+      state.panes = state.panes.filter((x) => x.id !== evictedId);
+    }
+  }
+  buildLayout();
+  renderSidebar();
+  renderSlotStrip();
+  try {
+    if (isText) {
+      const r = await api(`/api/fs/read?path=${encodeURIComponent(entry.path)}`);
+      p.content = r.content;
+      p.language = r.language;
+    } else {
+      const url = `/api/fs/preview?path=${encodeURIComponent(entry.path)}`;
+      const resp = await fetch(url, { credentials: 'same-origin' });
+      if (!resp.ok) {
+        let body = {};
+        try { body = await resp.json(); } catch {}
+        throw new Error(body.error || `HTTP ${resp.status}`);
+      }
+      const blob = await resp.blob();
+      p.previewUrl = URL.createObjectURL(blob);
+    }
+    p.loading = false;
+  } catch (e) {
+    p.error = e?.message || String(e);
+    p.loading = false;
+  }
+  if (slotOfPane(p.id) >= 0 && p.cellEl) {
+    renderFilePaneBody(p);
+    const sbRight = p.cellEl.querySelector('.statusbar .sb-right');
+    if (sbRight) sbRight.textContent = p.error ? 'error' : 'loaded';
+  }
+}
+
+function renderFilePaneBody(p) {
+  if (!p.cellEl) return;
+  const body = p.cellEl.querySelector('.file-body');
+  if (!body) return;
+  body.innerHTML = '';
+  if (p.loading) {
+    const ph = document.createElement('div');
+    ph.className = 'fx-empty';
+    ph.textContent = 'loading…';
+    body.appendChild(ph);
+    return;
+  }
+  if (p.error) {
+    const err = document.createElement('div');
+    err.className = 'fx-error';
+    err.textContent = `error: ${p.error}`;
+    body.appendChild(err);
+    return;
+  }
+  if (p.contentKind === 'text') {
+    const pre = document.createElement('pre');
+    pre.className = 'fx-text';
+    pre.textContent = p.content || '';
+    body.appendChild(pre);
+  } else if (p.contentKind === 'image' && p.previewUrl) {
+    const frame = document.createElement('div');
+    frame.className = 'fx-preview-frame';
+    const img = document.createElement('img');
+    img.src = p.previewUrl;
+    img.alt = p.fileName;
+    frame.appendChild(img);
+    body.appendChild(frame);
+  } else if (p.contentKind === 'pdf' && p.previewUrl) {
+    const frame = document.createElement('div');
+    frame.className = 'fx-preview-frame';
+    const iframe = document.createElement('iframe');
+    iframe.src = p.previewUrl;
+    iframe.title = p.fileName;
+    frame.appendChild(iframe);
+    body.appendChild(frame);
+  }
 }
 
 async function restartPane(id) {
@@ -1612,6 +1768,752 @@ function fxEntryBadge(entry) {
   if (entry.editable) return entry.previewKind === 'none' ? 'txt' : entry.previewKind;
   if (entry.previewKind !== 'none') return entry.previewKind;
   return 'bin';
+}
+
+/* ---------- sidebar tabs + global explorer ---------- */
+
+const exState = {
+  tab: 'sessions',
+  drives: [],
+  childrenByPath: new Map(),
+  expanded: new Set(),
+  selected: null,
+  loading: new Set(),
+  error: null,
+  rootPath: null,
+};
+
+function switchSidebarTab(name) {
+  if (exState.tab === name) return;
+  exState.tab = name;
+  for (const btn of $$('.sidebar-tab')) {
+    const active = btn.dataset.tab === name;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', String(active));
+  }
+  $('#sidebar-pane-sessions').classList.toggle('hidden', name !== 'sessions');
+  $('#sidebar-pane-explorer').classList.toggle('hidden', name !== 'explorer');
+  $('#sidebar-foot-sessions').style.display = name === 'sessions' ? '' : 'none';
+  if (name === 'explorer' && exState.drives.length === 0) {
+    void exInit();
+  }
+}
+
+async function exInit() {
+  try {
+    const r = await api('/api/fs/drives');
+    exState.drives = r.drives || [];
+    exState.rootPath = exState.drives[0] || 'C:/';
+    $('#explorer-path-input').value = exState.rootPath;
+    await exLoadDir(exState.rootPath);
+    exState.expanded.add(exState.rootPath);
+    exRender();
+  } catch (e) {
+    exState.error = `drives: ${e.message}`;
+    exRender();
+  }
+}
+
+async function exLoadDir(absPath) {
+  if (exState.loading.has(absPath)) return;
+  exState.loading.add(absPath);
+  exState.error = null;
+  exRender();
+  try {
+    const r = await api(`/api/fs/list?path=${encodeURIComponent(absPath)}`);
+    exState.childrenByPath.set(r.path, r.entries);
+    if (r.path !== absPath) exState.childrenByPath.set(absPath, r.entries);
+  } catch (e) {
+    exState.error = `${absPath}: ${e.message}`;
+  } finally {
+    exState.loading.delete(absPath);
+    exRender();
+  }
+}
+
+async function exToggle(absPath) {
+  if (exState.expanded.has(absPath)) {
+    exState.expanded.delete(absPath);
+    exRender();
+    return;
+  }
+  exState.expanded.add(absPath);
+  if (!exState.childrenByPath.has(absPath)) {
+    await exLoadDir(absPath);
+  } else {
+    exRender();
+  }
+}
+
+function exNormPath(p) {
+  return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '') || '/';
+}
+
+function exParentOf(absPath) {
+  const norm = exNormPath(absPath);
+  if (/^[a-zA-Z]:$/.test(norm) || norm === '/') return null;
+  const i = norm.lastIndexOf('/');
+  if (i <= 0) return null;
+  const parent = norm.slice(0, i);
+  if (/^[a-zA-Z]:$/.test(parent)) return parent + '/';
+  return parent || '/';
+}
+
+async function exNavigateTo(absPath) {
+  const trimmed = String(absPath || '').trim();
+  if (!trimmed) return;
+  exState.rootPath = trimmed;
+  $('#explorer-path-input').value = trimmed;
+  exState.expanded.clear();
+  exState.expanded.add(trimmed);
+  await exLoadDir(trimmed);
+}
+
+function exRender() {
+  if (exState.tab !== 'explorer') return;
+  const tree = $('#explorer-tree');
+  tree.innerHTML = '';
+  if (exState.error) {
+    const err = document.createElement('div');
+    err.className = 'exp-error';
+    err.textContent = exState.error;
+    tree.appendChild(err);
+  }
+  const root = exState.rootPath;
+  if (!root) {
+    const p = document.createElement('div');
+    p.className = 'exp-loading';
+    p.textContent = 'loading drives…';
+    tree.appendChild(p);
+    return;
+  }
+  tree.appendChild(exRenderNode({
+    name: root,
+    path: root,
+    kind: 'directory',
+    editable: false,
+    previewKind: 'none',
+  }, 0, true));
+}
+
+function exRenderNode(entry, depth, isRoot = false) {
+  const wrap = document.createElement('div');
+  const node = document.createElement('div');
+  node.className = 'exp-node';
+  if (exState.selected === entry.path) node.classList.add('selected');
+  node.style.paddingLeft = `${4 + depth * 12}px`;
+
+  const isDir = entry.kind === 'directory';
+  const expanded = isDir && exState.expanded.has(entry.path);
+  const loading = exState.loading.has(entry.path);
+
+  const twist = document.createElement('span');
+  twist.className = 'exp-twist';
+  twist.textContent = isDir ? (loading ? '·' : (expanded ? '▾' : '▸')) : ' ';
+  node.appendChild(twist);
+
+  const icon = document.createElement('span');
+  icon.className = `exp-icon ${isDir ? 'dir' : 'file'}`;
+  icon.textContent = isDir ? '▣' : '·';
+  node.appendChild(icon);
+
+  const name = document.createElement('span');
+  name.className = 'exp-name';
+  name.textContent = isRoot ? entry.path : entry.name;
+  name.title = entry.path;
+  node.appendChild(name);
+
+  node.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    exState.selected = entry.path;
+    $('#explorer-path-input').value = entry.path;
+    if (isDir) {
+      await exToggle(entry.path);
+    } else {
+      exRender();
+      await openFileInSlot(entry);
+    }
+  });
+
+  wrap.appendChild(node);
+
+  if (isDir && expanded) {
+    const children = exState.childrenByPath.get(entry.path);
+    const childWrap = document.createElement('div');
+    if (loading && !children) {
+      const p = document.createElement('div');
+      p.className = 'exp-loading';
+      p.style.paddingLeft = `${4 + (depth + 1) * 12}px`;
+      p.textContent = 'loading…';
+      childWrap.appendChild(p);
+    } else if (children) {
+      if (children.length === 0) {
+        const p = document.createElement('div');
+        p.className = 'exp-empty';
+        p.style.paddingLeft = `${4 + (depth + 1) * 12}px`;
+        p.textContent = 'empty';
+        childWrap.appendChild(p);
+      } else {
+        for (const c of children) {
+          childWrap.appendChild(exRenderNode(c, depth + 1));
+        }
+      }
+    }
+    wrap.appendChild(childWrap);
+  }
+  return wrap;
+}
+
+for (const btn of $$('.sidebar-tab')) {
+  btn.addEventListener('click', () => switchSidebarTab(btn.dataset.tab));
+}
+$('#explorer-up').addEventListener('click', async () => {
+  const cur = $('#explorer-path-input').value.trim() || exState.rootPath;
+  const parent = exParentOf(cur);
+  if (parent) await exNavigateTo(parent);
+});
+$('#explorer-path-input').addEventListener('keydown', async (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    await exNavigateTo(e.target.value);
+  }
+});
+
+/* ============================================================
+ * Phase 2: filesystem mutations (mkdir/delete/rename/write/upload)
+ * Used by Explorer right-click menu, file-pane editor, and the
+ * terminal-pane drop overlay (Telegram-style drag-drop).
+ * ============================================================ */
+
+// Single rolling context menu — exclusive (open new closes old). Returns the
+// element so callers can dispatch focus / aria for keyboard nav.
+let ctxMenuEl = null;
+function closeCtxMenu() {
+  if (ctxMenuEl) { ctxMenuEl.remove(); ctxMenuEl = null; }
+}
+document.addEventListener('click', (e) => {
+  if (ctxMenuEl && !ctxMenuEl.contains(e.target)) closeCtxMenu();
+}, true);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && ctxMenuEl) closeCtxMenu();
+});
+
+function openCtxMenu(items, x, y) {
+  closeCtxMenu();
+  const menu = document.createElement('div');
+  menu.className = 'ctx-menu';
+  for (const it of items) {
+    if (it === '---') {
+      const sep = document.createElement('div');
+      sep.className = 'ctx-menu-sep';
+      menu.appendChild(sep);
+      continue;
+    }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ctx-menu-item' + (it.danger ? ' danger' : '');
+    btn.textContent = it.label;
+    if (it.disabled) btn.disabled = true;
+    btn.addEventListener('click', () => {
+      closeCtxMenu();
+      try { it.onClick(); } catch (e) { toast(`action failed: ${e.message || e}`, 'err'); }
+    });
+    menu.appendChild(btn);
+  }
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  const px = Math.min(x, window.innerWidth - rect.width - 4);
+  const py = Math.min(y, window.innerHeight - rect.height - 4);
+  menu.style.left = `${Math.max(4, px)}px`;
+  menu.style.top = `${Math.max(4, py)}px`;
+  ctxMenuEl = menu;
+  return menu;
+}
+
+// CSRF-aware JSON mutation. Returns parsed JSON; throws on !ok with body.
+async function apiMutate(path, method, body) {
+  const init = {
+    method,
+    credentials: 'same-origin',
+    headers: { ...csrfHeader() },
+  };
+  if (body !== undefined) {
+    init.headers['content-type'] = 'application/json';
+    init.body = JSON.stringify(body);
+  }
+  const r = await fetch(path, init);
+  if (r.status === 401) { showAuth(); throw new Error('unauthorized'); }
+  let parsed = {};
+  try { parsed = await r.json(); } catch {}
+  if (!r.ok) {
+    const e = new Error(parsed.error || `${r.status}`);
+    e.body = parsed;
+    e.status = r.status;
+    throw e;
+  }
+  return parsed;
+}
+
+// Multipart upload helper. Used by Explorer "Upload here" + terminal drop.
+// Returns the server's entry summary (which may have an autosuffixed name).
+async function uploadFile(absDir, file, { autosuffix = true } = {}) {
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  const url = `/api/fs/upload?dir=${encodeURIComponent(absDir)}&autosuffix=${autosuffix ? 'true' : 'false'}`;
+  const r = await fetch(url, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { ...csrfHeader() },
+    body: fd,
+  });
+  if (r.status === 401) { showAuth(); throw new Error('unauthorized'); }
+  let parsed = {};
+  try { parsed = await r.json(); } catch {}
+  if (!r.ok) {
+    const e = new Error(parsed.error || `${r.status}`);
+    e.body = parsed;
+    e.status = r.status;
+    throw e;
+  }
+  return parsed.entry;
+}
+
+// Inline prompt that returns the typed value or null (Esc / Cancel). Built
+// instead of window.prompt() so we can preselect / theme / handle Enter.
+function promptInline(title, initial = '', placeholder = '') {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'prompt-overlay';
+    overlay.innerHTML = `
+      <div class="prompt-card">
+        <div class="prompt-title"></div>
+        <input type="text" class="prompt-input" />
+        <div class="prompt-actions">
+          <button type="button" class="prompt-cancel">Cancel</button>
+          <button type="button" class="prompt-ok">OK</button>
+        </div>
+      </div>
+    `;
+    overlay.querySelector('.prompt-title').textContent = title;
+    const input = overlay.querySelector('.prompt-input');
+    input.value = initial;
+    input.placeholder = placeholder;
+    document.body.appendChild(overlay);
+    function done(v) { overlay.remove(); resolve(v); }
+    overlay.querySelector('.prompt-cancel').addEventListener('click', () => done(null));
+    overlay.querySelector('.prompt-ok').addEventListener('click', () => done(input.value));
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) done(null); });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); done(input.value); }
+      if (e.key === 'Escape') { e.preventDefault(); done(null); }
+    });
+    setTimeout(() => { input.focus(); input.select(); }, 0);
+  });
+}
+
+// Reload the parent dir's listing in the Explorer tree after a mutation so
+// the tree shows the new state without a full reload. If the mutated path
+// IS the tree root, we reload the root itself.
+async function exRefreshDir(absPath) {
+  const target = exNormPath(absPath);
+  exState.childrenByPath.delete(target);
+  await exLoadDir(target);
+}
+
+function exParentDirOf(absPath) {
+  // Like exParentOf but treats a drive root as itself (so refresh at root works)
+  const parent = exParentOf(absPath);
+  return parent || absPath;
+}
+
+/* ---------- Explorer right-click actions ---------- */
+
+async function exActionNewFolder(parentAbsPath) {
+  const name = await promptInline('새 폴더 이름', '', 'new-folder');
+  if (!name) return;
+  const target = `${parentAbsPath.replace(/[\\/]+$/, '')}/${name}`;
+  try {
+    await apiMutate('/api/fs/mkdir', 'POST', { path: target });
+    await exRefreshDir(parentAbsPath);
+    exState.expanded.add(parentAbsPath);
+    exRender();
+    toast(`폴더 생성: ${name}`, 'ok', 2500);
+  } catch (e) {
+    toast(`mkdir 실패: ${e.body?.error || e.message}`, 'err');
+  }
+}
+
+async function exActionNewFile(parentAbsPath) {
+  const name = await promptInline('새 파일 이름 (.txt/.md/.json 등 텍스트 확장자)', '', 'notes.md');
+  if (!name) return;
+  const target = `${parentAbsPath.replace(/[\\/]+$/, '')}/${name}`;
+  try {
+    await apiMutate('/api/fs/write', 'PUT', { path: target, content: '', createIfMissing: true });
+    await exRefreshDir(parentAbsPath);
+    exState.expanded.add(parentAbsPath);
+    exRender();
+    toast(`파일 생성: ${name}`, 'ok', 2500);
+  } catch (e) {
+    toast(`new file 실패: ${e.body?.error || e.message}`, 'err');
+  }
+}
+
+async function exActionRename(entry) {
+  const oldName = entry.name || entry.path.split(/[\\/]/).pop();
+  const newName = await promptInline('이름 바꾸기', oldName, oldName);
+  if (!newName || newName === oldName) return;
+  const parent = exParentOf(entry.path);
+  if (!parent) { toast('cannot rename a drive root', 'err'); return; }
+  const newPath = `${parent.replace(/[\\/]+$/, '')}/${newName}`;
+  try {
+    await apiMutate('/api/fs/rename', 'PATCH', { from: entry.path, to: newPath });
+    await exRefreshDir(parent);
+    exRender();
+    toast(`이름 변경: ${oldName} → ${newName}`, 'ok', 2500);
+  } catch (e) {
+    toast(`rename 실패: ${e.body?.error || e.message}`, 'err');
+  }
+}
+
+async function exActionDelete(entry) {
+  const isDir = entry.kind === 'directory';
+  const label = isDir ? '폴더' : '파일';
+  if (!confirm(`"${entry.name}" ${label}을(를) 삭제할까요?${isDir ? '\n안에 있는 모든 항목이 같이 사라집니다.' : ''}\n복구 불가.`)) return;
+  const url = `/api/fs/entry?path=${encodeURIComponent(entry.path)}${isDir ? '&recursive=true' : ''}`;
+  try {
+    await apiMutate(url, 'DELETE');
+    const parent = exParentOf(entry.path) || entry.path;
+    await exRefreshDir(parent);
+    if (exState.selected === entry.path) exState.selected = null;
+    exState.expanded.delete(entry.path);
+    exRender();
+    // Close any open file pane that pointed at the deleted path
+    const stale = state.panes.find((p) => p.kind === 'file' && p.filePath === entry.path);
+    if (stale) closePane(stale.id);
+    toast(`${label} 삭제: ${entry.name}`, 'ok', 2500);
+  } catch (e) {
+    toast(`삭제 실패: ${e.body?.error || e.message}`, 'err');
+  }
+}
+
+async function exActionUpload(parentAbsPath) {
+  const picker = document.createElement('input');
+  picker.type = 'file';
+  picker.multiple = true;
+  picker.addEventListener('change', async () => {
+    const files = [...(picker.files || [])];
+    if (!files.length) return;
+    let okCount = 0;
+    for (const f of files) {
+      try {
+        const entry = await uploadFile(parentAbsPath, f);
+        okCount++;
+        toast(`업로드: ${entry.name} (${formatBytes(entry.bytesWritten)})`, 'ok', 2500);
+      } catch (e) {
+        toast(`업로드 실패 ${f.name}: ${e.body?.error || e.message}`, 'err');
+      }
+    }
+    if (okCount > 0) {
+      await exRefreshDir(parentAbsPath);
+      exState.expanded.add(parentAbsPath);
+      exRender();
+    }
+  });
+  picker.click();
+}
+
+function formatBytes(n) {
+  if (n == null) return '?';
+  if (n < 1024) return `${n}B`;
+  if (n < 1048576) return `${(n / 1024).toFixed(1)}KB`;
+  if (n < 1073741824) return `${(n / 1048576).toFixed(1)}MB`;
+  return `${(n / 1073741824).toFixed(2)}GB`;
+}
+
+function openExplorerCtxMenu(entry, ev) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  const isDir = entry.kind === 'directory';
+  const isLink = entry.isLink;
+  const items = [];
+  if (isDir) {
+    items.push({ label: '새 폴더', onClick: () => exActionNewFolder(entry.path) });
+    items.push({ label: '새 텍스트 파일', onClick: () => exActionNewFile(entry.path) });
+    items.push({ label: '파일 업로드…', onClick: () => exActionUpload(entry.path) });
+    items.push('---');
+  } else {
+    items.push({ label: '슬롯에 열기', onClick: () => openFileInSlot(entry) });
+    items.push('---');
+  }
+  items.push({ label: '이름 바꾸기', disabled: isLink, onClick: () => exActionRename(entry) });
+  items.push({ label: '삭제', danger: true, onClick: () => exActionDelete(entry) });
+  items.push('---');
+  items.push({ label: '새로고침', onClick: async () => {
+    await exRefreshDir(isDir ? entry.path : (exParentOf(entry.path) || entry.path));
+    exRender();
+  }});
+  openCtxMenu(items, ev.clientX, ev.clientY);
+}
+
+/* ---------- Explorer tree context menu wiring (re-render hook) ---------- */
+// We monkey-patch exRenderNode at runtime to attach contextmenu listeners to
+// each node it produces — keeps the original render function untouched and
+// makes the Phase 2 wiring a single point we can unhook later.
+const _origExRenderNode = exRenderNode;
+exRenderNode = function patchedExRenderNode(entry, depth, isRoot = false) {
+  const wrap = _origExRenderNode(entry, depth, isRoot);
+  const node = wrap.querySelector('.exp-node');
+  if (node) node.addEventListener('contextmenu', (e) => openExplorerCtxMenu(entry, e));
+  return wrap;
+};
+// Re-render the tree so the freshly-attached contextmenu listener takes effect
+// for the already-mounted root node (subsequent expansions also pick it up).
+if (exState.tab === 'explorer') exRender();
+
+/* ============================================================
+ * File pane edit mode (text only) + CAS save
+ * ============================================================ */
+
+// Edit mode is a per-pane flag stored as p.editMode. When true, render
+// the body as a <textarea> seeded with p.content. Save uses expectedVersion
+// from p.fileVersion (captured at read time).
+
+function fileVersionFromRead(p, r) {
+  // r is the JSON returned by /api/fs/read
+  p.fileVersion = r.version || null;
+}
+
+// Patch openFileInSlot to capture version stamp after read
+const _origOpenFileInSlot = openFileInSlot;
+openFileInSlot = async function patchedOpenFileInSlot(entry) {
+  await _origOpenFileInSlot(entry);
+  const p = paneByFilePath(entry.path);
+  if (!p) return;
+  // The read response was consumed in _origOpenFileInSlot; we don't have direct
+  // access to its `version` field there. Refetch lightweight stat by calling
+  // read once more if we don't have it. Cheap on text files (already cached
+  // in memory by the OS) and only happens once per open.
+  if (!p.fileVersion && p.contentKind === 'text' && p.filePath) {
+    try {
+      const r = await api(`/api/fs/read?path=${encodeURIComponent(p.filePath)}`);
+      fileVersionFromRead(p, r);
+    } catch {}
+  }
+  // Inject Edit button + Save button into the pane header once mounted
+  attachFileEditControls(p);
+};
+
+function attachFileEditControls(p) {
+  if (!p?.cellEl || p.kind !== 'file' || p.contentKind !== 'text') return;
+  const tools = p.cellEl.querySelector('.session-tools');
+  if (!tools || tools.querySelector('[data-act="edit"]')) return;
+  const close = tools.querySelector('[data-act="close"]');
+  const editBtn = document.createElement('div');
+  editBtn.className = 'btn';
+  editBtn.dataset.act = 'edit';
+  editBtn.title = 'Edit (replace pane body with editor)';
+  editBtn.textContent = '✎';
+  editBtn.addEventListener('click', (e) => { e.stopPropagation(); fileEnterEditMode(p); });
+  const saveBtn = document.createElement('div');
+  saveBtn.className = 'btn';
+  saveBtn.dataset.act = 'save';
+  saveBtn.title = 'Save (Ctrl+S)';
+  saveBtn.textContent = '💾';
+  saveBtn.style.display = 'none';
+  saveBtn.addEventListener('click', (e) => { e.stopPropagation(); fileSave(p); });
+  tools.insertBefore(editBtn, close);
+  tools.insertBefore(saveBtn, close);
+}
+
+function fileEnterEditMode(p) {
+  if (!p.cellEl) return;
+  p.editMode = true;
+  const body = p.cellEl.querySelector('.file-body');
+  if (!body) return;
+  body.innerHTML = '';
+  const ta = document.createElement('textarea');
+  ta.className = 'fx-editor';
+  ta.spellcheck = false;
+  ta.value = p.content ?? '';
+  ta.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      e.preventDefault();
+      fileSave(p);
+    }
+  });
+  body.appendChild(ta);
+  p.editorEl = ta;
+  // Toggle button visibility
+  const editBtn = p.cellEl.querySelector('[data-act="edit"]');
+  const saveBtn = p.cellEl.querySelector('[data-act="save"]');
+  if (editBtn) editBtn.style.display = 'none';
+  if (saveBtn) saveBtn.style.display = '';
+  // Status bar: switch from "read-only" to "edit · unsaved"
+  const sbModel = p.cellEl.querySelector('.statusbar .sb-model');
+  if (sbModel) sbModel.textContent = `${p.language || 'text'} · edit`;
+  setTimeout(() => ta.focus(), 0);
+}
+
+async function fileSave(p) {
+  if (!p.editorEl) return;
+  const newContent = p.editorEl.value;
+  try {
+    const r = await apiMutate('/api/fs/write', 'PUT', {
+      path: p.filePath,
+      content: newContent,
+      expectedVersion: p.fileVersion || undefined,
+      createIfMissing: !p.fileVersion,
+    });
+    p.content = newContent;
+    p.fileVersion = r.entry?.version || null;
+    toast(`저장: ${p.fileName} (${formatBytes(r.entry?.version?.size)})`, 'ok', 2500);
+    // Stay in edit mode (no jarring view switch). Update statusbar.
+    const sbRight = p.cellEl.querySelector('.statusbar .sb-right');
+    if (sbRight) sbRight.textContent = 'saved';
+  } catch (e) {
+    if (e.body?.error === 'stale-version') {
+      const reload = confirm('파일이 외부에서 수정되었습니다. 디스크 내용으로 다시 읽을까요? (취소 = 내 편집 유지)');
+      if (reload) {
+        try {
+          const r = await api(`/api/fs/read?path=${encodeURIComponent(p.filePath)}`);
+          p.content = r.content;
+          fileVersionFromRead(p, r);
+          if (p.editorEl) p.editorEl.value = r.content;
+          toast('reloaded from disk', 'amber', 2500);
+        } catch (re) {
+          toast(`reload 실패: ${re.message}`, 'err');
+        }
+      }
+    } else {
+      toast(`저장 실패: ${e.body?.error || e.message}`, 'err');
+    }
+  }
+}
+
+/* ============================================================
+ * Terminal pane drag-drop overlay + clipboard paste
+ * (Telegram-style: drop files / paste screenshot → upload into
+ *  session's cwd → echo the new path back to the terminal so
+ *  the running claude/devplatform/shell can `cat` it immediately.)
+ * ============================================================ */
+
+// Per-pane wiring is idempotent — buildLayout calls this every layout. The
+// .drop-overlay element is created once per pane mount; subsequent calls
+// re-attach handlers to the same overlay if it's still there.
+function attachTerminalDropHandlers(p) {
+  if (!p?.cellEl) return;
+  if (p.kind === 'file') return; // file panes have their own editor
+  if (!p.cwd) return;            // no upload target
+
+  const cell = p.cellEl;
+  if (cell.dataset.dropWired === '1') return;
+  cell.dataset.dropWired = '1';
+
+  const overlay = document.createElement('div');
+  overlay.className = 'drop-overlay';
+  overlay.innerHTML = `
+    <div class="drop-overlay-card">
+      <div class="drop-overlay-icon">⇪</div>
+      <div class="drop-overlay-title">drop to upload</div>
+      <div class="drop-overlay-sub"></div>
+    </div>
+  `;
+  overlay.querySelector('.drop-overlay-sub').textContent = `→ ${p.cwd}`;
+  cell.appendChild(overlay);
+
+  let depth = 0;
+  cell.addEventListener('dragenter', (e) => {
+    if (!eventHasFiles(e)) return;
+    depth++;
+    overlay.classList.add('active');
+    e.preventDefault();
+  });
+  cell.addEventListener('dragover', (e) => {
+    if (!eventHasFiles(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  });
+  cell.addEventListener('dragleave', () => {
+    depth = Math.max(0, depth - 1);
+    if (depth === 0) overlay.classList.remove('active');
+  });
+  cell.addEventListener('drop', async (e) => {
+    if (!eventHasFiles(e)) return;
+    e.preventDefault();
+    depth = 0;
+    overlay.classList.remove('active');
+    const files = [...(e.dataTransfer.files || [])];
+    if (!files.length) return;
+    await uploadFilesToTerminal(p, files);
+  });
+}
+
+function eventHasFiles(e) {
+  const t = e.dataTransfer;
+  if (!t) return false;
+  if (t.types && [...t.types].includes('Files')) return true;
+  return false;
+}
+
+async function uploadFilesToTerminal(p, files) {
+  if (!p.cwd) return;
+  for (const f of files) {
+    // Pre-upload echo so user sees activity even on slow networks
+    termEcho(p, `\x1b[2m[upload starting: ${f.name} (${formatBytes(f.size)})]\x1b[0m`);
+    try {
+      const entry = await uploadFile(p.cwd, f);
+      const rel = `./${entry.name}`;
+      termEcho(p, `\x1b[36m[📎 uploaded → ${rel}]  ${formatBytes(entry.bytesWritten)}\x1b[0m`);
+    } catch (e) {
+      const msg = e.body?.error || e.message;
+      termEcho(p, `\x1b[31m[upload failed: ${f.name}: ${msg}]\x1b[0m`);
+      toast(`업로드 실패 ${f.name}: ${msg}`, 'err');
+    }
+  }
+}
+
+function termEcho(p, msg) {
+  if (!p?.term) return;
+  try { p.term.write(`\r\n${msg}\r\n`); } catch {}
+}
+
+// Clipboard paste: when the user pastes an image (e.g. screenshot) while a
+// terminal pane is focused, treat it as a file upload. Text paste is left to
+// xterm's own paste handler (it routes to PTY stdin).
+document.addEventListener('paste', (e) => {
+  const active = paneById(state.slots[state.activeSlot]);
+  if (!active || active.kind === 'file') return;
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  const files = [];
+  for (const it of items) {
+    if (it.kind === 'file') {
+      const f = it.getAsFile();
+      if (f) {
+        // Screenshots usually arrive as "image.png" with no name; synthesize one.
+        const named = f.name ? f : new File([f], `clipboard-${Date.now()}.${(f.type.split('/')[1] || 'bin')}`, { type: f.type });
+        files.push(named);
+      }
+    }
+  }
+  if (files.length === 0) return;
+  e.preventDefault();
+  void uploadFilesToTerminal(active, files);
+});
+
+// Wire drop handlers on every buildLayout — patch original.
+const _origBuildLayout = buildLayout;
+buildLayout = function patchedBuildLayout() {
+  _origBuildLayout();
+  for (const id of state.slots) {
+    const p = id && paneById(id);
+    if (p) attachTerminalDropHandlers(p);
+  }
+};
+// Re-run for already-mounted panes from initial buildLayout()
+for (const id of state.slots) {
+  const p = id && paneById(id);
+  if (p) attachTerminalDropHandlers(p);
 }
 
 checkAuth();

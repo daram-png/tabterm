@@ -495,6 +495,25 @@ html, body {
 }
 .session-tools .btn:hover { background: #1d1d1d; color: var(--text-2); }
 
+/* ─── file pane body (read-only viewer in a slot) ─── */
+.file-body {
+  flex: 1; min-height: 0;
+  background: var(--bg);
+  padding: 10px 14px;
+  overflow: auto;
+  position: relative;
+}
+.file-body .fx-text {
+  font-family: "Geist Mono", monospace; font-size: 12px;
+  white-space: pre-wrap; word-wrap: break-word;
+  color: var(--text); margin: 0;
+}
+.file-body .fx-preview-frame { display: flex; justify-content: center; min-height: 100%; }
+.file-body .fx-preview-frame img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.file-body .fx-preview-frame iframe { width: 100%; height: 100%; min-height: 480px; border: 0; background: #fff; }
+.file-body .fx-empty, .file-body .fx-error { padding: 16px; color: var(--muted); font-size: 12px; text-align: center; }
+.file-body .fx-error { color: var(--amber); }
+
 /* ─── terminal (xterm host) ─── */
 .terminal {
   flex: 1; min-height: 0;
@@ -696,3 +715,261 @@ body.ios-ime .workspace { padding-bottom: 120px; }
 .ws-kebab-item:hover { background: var(--bg-3, #2a2a2a); }
 .ws-kebab-item.danger { color: #e85a5a; }
 .ws-kebab-item:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* sidebar tab bar (Sessions / Explorer) */
+.sidebar-tabs {
+  display: flex;
+  border-bottom: 1px solid #1a1a1a;
+  background: #0c0c0c;
+  flex-shrink: 0;
+}
+.sidebar-tab {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  padding: 9px 0;
+  font: 500 11.5px/1 inherit;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+.sidebar-tab:hover { color: var(--text-2); }
+.sidebar-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+.sidebar-pane { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+.sidebar-pane.hidden { display: none; }
+
+/* explorer */
+.explorer-toolbar {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid #161616;
+  flex-shrink: 0;
+}
+.explorer-path-input {
+  flex: 1;
+  background: #0a0a0a;
+  border: 1px solid #1f1f1f;
+  border-radius: 4px;
+  color: var(--text);
+  padding: 4px 7px;
+  font: 11px "Geist Mono", monospace;
+  outline: none;
+  min-width: 0;
+}
+.explorer-path-input:focus { border-color: var(--accent); }
+.explorer-up {
+  background: #0a0a0a;
+  border: 1px solid #1f1f1f;
+  border-radius: 4px;
+  color: var(--text-2);
+  font: 12px inherit;
+  padding: 0 8px;
+  cursor: pointer;
+}
+.explorer-up:hover { background: #141414; color: var(--text); }
+.explorer-tree {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0 8px;
+  font: 12px "Geist Mono", monospace;
+}
+.explorer-tree::-webkit-scrollbar { width: 6px; }
+.explorer-tree::-webkit-scrollbar-thumb { background: #1f1f1f; border-radius: 6px; }
+.explorer-tree::-webkit-scrollbar-track { background: transparent; }
+.exp-node {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px 2px 4px;
+  cursor: pointer;
+  color: var(--text-2);
+  white-space: nowrap;
+  user-select: none;
+}
+.exp-node:hover { background: #131313; color: var(--text); }
+.exp-node.selected { background: #1d4ed8; color: #f1f5f9; }
+.exp-twist {
+  display: inline-block;
+  width: 10px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+.exp-icon {
+  display: inline-block;
+  width: 12px;
+  text-align: center;
+  flex-shrink: 0;
+  font-size: 11px;
+}
+.exp-icon.dir { color: var(--amber); }
+.exp-icon.file { color: var(--muted); }
+.exp-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.exp-empty, .exp-error, .exp-loading {
+  padding: 8px 12px;
+  font: 11px inherit;
+  color: var(--muted);
+}
+.exp-error { color: var(--red); }
+
+/* ---------- Phase 2: context menu (Explorer right-click) ---------- */
+.ctx-menu {
+  position: fixed;
+  background: #141414;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  padding: 4px 0;
+  min-width: 160px;
+  z-index: 10000;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+  font: 12px "Geist Mono", monospace;
+}
+.ctx-menu-item {
+  display: block;
+  width: 100%;
+  padding: 6px 14px;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.ctx-menu-item:hover { background: #1f1f1f; }
+.ctx-menu-item.danger { color: #ef6a6a; }
+.ctx-menu-item.danger:hover { background: #2a1212; color: #ff8585; }
+.ctx-menu-item:disabled { opacity: 0.35; cursor: not-allowed; background: transparent !important; }
+.ctx-menu-sep {
+  height: 1px;
+  background: #2a2a2a;
+  margin: 4px 0;
+}
+
+/* ---------- Phase 2: prompt modal (inline input dialog) ---------- */
+.prompt-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10001;
+}
+.prompt-card {
+  background: #0f0f0f;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  padding: 16px 18px;
+  min-width: 360px;
+  max-width: 520px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+}
+.prompt-title {
+  color: var(--text);
+  font: 12px "Geist Mono", monospace;
+  margin-bottom: 10px;
+}
+.prompt-input {
+  width: 100%;
+  background: #0a0a0a;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  color: var(--text);
+  font: 13px "Geist Mono", monospace;
+  padding: 8px 10px;
+  box-sizing: border-box;
+}
+.prompt-input:focus { outline: none; border-color: var(--accent); }
+.prompt-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+.prompt-actions button {
+  padding: 6px 14px;
+  border-radius: 4px;
+  font: 12px "Geist Mono", monospace;
+  border: 1px solid #2a2a2a;
+  background: #141414;
+  color: var(--text);
+  cursor: pointer;
+}
+.prompt-actions .prompt-ok {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.prompt-actions button:hover { filter: brightness(1.15); }
+
+/* ---------- Phase 2: file editor textarea ---------- */
+.fx-editor {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #0a0a0a;
+  color: #ededed;
+  padding: 12px 14px;
+  font: 13px/1.55 "Geist Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  resize: none;
+  outline: none;
+  box-sizing: border-box;
+  tab-size: 2;
+}
+.fx-editor:focus { outline: none; }
+
+/* ---------- Phase 2: drop overlay (Telegram-style upload to terminal) ---------- */
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10,10,10,0.78);
+  border: 2px dashed transparent;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .12s ease;
+  z-index: 50;
+}
+.drop-overlay.active {
+  opacity: 1;
+  border-color: var(--accent);
+  pointer-events: auto;
+}
+.drop-overlay-card {
+  background: #0a0a0a;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  padding: 32px 48px;
+  text-align: center;
+  box-shadow: 0 16px 48px rgba(91,142,247,0.25);
+}
+.drop-overlay-icon {
+  font-size: 38px;
+  line-height: 1;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+.drop-overlay-title {
+  font: 14px "Geist Mono", monospace;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+.drop-overlay-sub {
+  font: 11px "Geist Mono", monospace;
+  color: var(--muted);
+  word-break: break-all;
+  max-width: 320px;
+}
+
+/* pane needs position context for the absolute drop overlay */
+.pane { position: relative; }

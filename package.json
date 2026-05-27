@@ -1,6 +1,6 @@
 {
   "name": "tabterm",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
   "description": "Windows-native browser PTY multiplexer (tabs/splits/reattach/PWA) for headless servers",
@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",
+    "@fastify/multipart": "^10.0.0",
     "@fastify/rate-limit": "^10.2.2",
     "@fastify/static": "^8.0.4",
     "@fastify/websocket": "^11.0.2",

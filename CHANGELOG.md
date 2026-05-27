@@ -1,5 +1,115 @@
 # Changelog
 
+## 0.9.0 — 2026-05-26
+
+### Added — Phase 2 file explorer write ops (mkdir / delete / rename / save / upload)
+
+Explorer 탭이 read-only 에서 full read/write 로 확장. 폴더/파일 생성·삭제·이름변경·텍스트 저장·바이너리 업로드 전부 지원.
+
+- **새 서버 헬퍼** (`server/file-explorer.js`): `mkdirEntry`, `deleteEntry`, `renameEntry`, `writeTextFile`, `writeUpload` (jailed 변형) + `mkdirEntryAbsolute`, `deleteEntryAbsolute`, `renameEntryAbsolute`, `writeTextFileAbsolute`, `writeUploadAbsolute` (절대경로). 전부 `resolveSafePath` 의 segment-walk + realpath 격리 모델 재사용. atomic write 는 tmp-sibling + `fs.rename` (NTFS/ext4/APFS 모두 atomic 보장).
+- **expectedVersion CAS**: 텍스트 저장 시 `{size, mtimeMs}` 비교 — 외부에서 수정된 파일을 덮어쓰면 409 `stale-version` 반환. 클라이언트가 reload 다이얼로그로 처리.
+- **autosuffix**: 업로드 충돌 시 `name (1).ext`, `name (2).ext` 자동 명명 (최대 999회). Telegram drag-drop 처럼 silent overwrite 절대 없음.
+- **새 라우트 10개** (`server/index.js`, 전부 auth + CSRF):
+  - Jailed (`/api/sessions/folders/:name/fs/*`): `POST mkdir`, `DELETE entry?path&recursive`, `PATCH rename`, `PUT write`, `POST upload` (multipart)
+  - Absolute (`/api/fs/*`): 동일 5종 (절대경로 body/query)
+- **새 dep**: `@fastify/multipart@^9` — 100MB 업로드 cap, single file part, fieldSize 64KB.
+- **테스트**: `server/file-explorer.test.js` +22 cases — mkdir/delete/rename/write/upload 의 happy path + 409 conflict + 404 missing + 413 too-large + 415 not-text + jail traversal + tmp-prefix race 방어. 40/40 pass.
+
+### Added — Explorer 우클릭 컨텍스트 메뉴
+
+- 트리 노드에 마우스 우클릭 → 컨텍스트 메뉴:
+  - **폴더 노드**: 새 폴더 / 새 텍스트 파일 / 파일 업로드… / 이름 바꾸기 / 삭제 / 새로고침
+  - **파일 노드**: 슬롯에 열기 / 이름 바꾸기 / 삭제 / 새로고침
+- **inline prompt**: window.prompt 대신 themed modal (Esc 취소, Enter 확정, 자동 select-all).
+- 변이 후 부모 디렉토리 자동 refresh — 전체 reload 없이 트리 갱신.
+- 삭제된 경로가 열린 file pane 의 대상이면 그 pane 도 자동 close.
+
+### Added — File pane Edit 모드 (텍스트 파일 한정)
+
+- 텍스트 file pane 헤더에 `✎` Edit + `💾` Save 버튼 추가. Edit 누르면 `<pre>` → `<textarea>` 전환, `Ctrl+S` 저장.
+- 저장 시 expectedVersion 보내고 409 stale-version 받으면 reload 다이얼로그 띄움 (취소하면 내 편집 유지).
+- 저장 후 새 version stamp 받아서 다음 저장이 정상 CAS 되도록 갱신.
+
+### Added — 터미널 텔레그램-스타일 drag-drop / paste 업로드
+
+세션 PTY 터미널 pane 에 파일을 드래그-드롭 하거나 (스크린샷 등) 이미지를 paste 하면, 세션의 cwd 로 업로드된 뒤 터미널에 `[📎 uploaded → ./filename.ext] 12.4KB` 라인이 echo 됨. 안에서 돌아가는 claude/opencode/shell 이 즉시 `cat`/`vim` 으로 접근 가능.
+
+- **drop overlay**: dragenter 시 반투명 카드 (`drop to upload → C:/workspace/session-XXXX`) 표시. dragleave depth 카운트로 중첩 드래그 처리.
+- **paste 핸들러**: `document` paste 이벤트 가로채서 `clipboardData.items` 중 `kind==='file'` 만 추출. 스크린샷은 이름 비어있으므로 `clipboard-${ts}.png` 로 합성.
+- 모든 업로드는 절대경로 라우트 (`POST /api/fs/upload?dir=<session cwd>`) 사용 — 세션이 subagent-N (jail 보호 폴더) 안에 있어도 동작.
+- autosuffix 기본 ON — 같은 이름 드롭 시 안전하게 `name (1).ext`.
+
+### Changed — package.json 0.8.0 → 0.9.0, sw.js VERSION v24-fs-mutations-and-drop-upload
+
+캐시 무효화 위해 Ctrl+Shift+R 1회 필요. (또는 PWA 재설치)
+
+### Security
+
+- 모든 mutation 라우트 CSRF 헤더 검증. 업로드 multipart 단일 파일 100MB cap, fieldSize 64KB.
+- `.tabterm-tmp-*` 접두사 leaf 차단 (race 방어 — 다른 탭의 in-flight atomic write 와 충돌 방지).
+- 업로드 파일명은 `sanitizeUploadName` 으로 path separator 치환 + leading-dot strip, 이후 `validateRelPath` 정상 경로 통과 필수.
+- jailed 변형은 symlink/junction 의 mutation 거부 (`symlink-not-allowed` 400) — read 경로의 jail 모델과 일관.
+- 절대경로 변형은 jail 없음 (auth + localhost + OS user 권한 모델 — Phase 1 의 절대 read 와 동일 신뢰 모델).
+
+## Unreleased
+
+### Fixed — Windows 디렉터리 junction(C:\Documents and Settings 등)이 "binary file not previewable" 토스트로 죽던 버그
+
+- 증상: 글로벌 Explorer(`/api/fs/list?path=C:\`) 사이드바에서 `Documents and Settings` 클릭 → 토스트 `Documents and Settings: binary file not previewable` → 열리지도 펼쳐지지도 않음. v22 file-pane-in-slot 이후 실사용에서 발견.
+- 원인: `server/file-explorer.js`의 `listDirectoryAbsolute()` 는 자식 엔트리마다 `lstat()` 호출 후 `entryKindFromStat()` 로 분류한다. Node `fs.lstat` 는 Windows 디렉터리 junction(NTFS reparse point)에 대해 `isSymbolicLink()=true, isDirectory()=false` 를 반환한다(실험으로 확인). 따라서 junction은 `kind: 'symlink'` 로 분류되고 — 클라이언트 `openFileInSlot` 은 `entry.kind === 'directory'` 일 때만 early-return하므로 `'symlink'` 는 그대로 통과해 file pane 분기로 들어가고, `editable=false` + `previewKind='none'` → "binary file not previewable" 토스트가 발화됐다. 트리 노드 역시 `isDir = entry.kind === 'directory'` 검사로 junction을 디렉터리로 인식하지 못해 펼침 트위스트 화살표 자체가 안 나왔다.
+- Fix (server): `classifyChildEntry(absPath, lstatResult)` 헬퍼 신설. `lstat` 가 symlink로 보이면 `stat()` 으로 target을 따라가 target의 kind를 사용. 정상 junction → `kind: 'directory', isLink: true`. 파일 symlink → `kind: 'file', isLink: true`. 깨진 link(`stat` ENOENT 등) → `kind: 'symlink', isLink: true, isBroken: true`. **`listDirectoryAbsolute` (사이드바 글로벌 Explorer가 실제로 호출하는 변종) 에만 적용.** Jailed `listDirectory` 는 의도적으로 종전 분류 유지 — 이유는 `resolveSafePath/assertNoSymlinkSegments` 가 jail-escape 방지로 symlink traversal을 거절하므로 junction을 `kind:'directory'` 로 표시하면 클라이언트가 펼침 affordance를 제공한 후 서버가 `symlink-not-allowed` 로 거절하는 모순이 생긴다. cdxplatform peer review(`bg_1354c804`) Finding #1 이 이 회귀를 정확히 지적함. 라이브 검증: `C:\Documents and Settings` → `kind:'directory', isLink:true, isBroken:false` 확인.
+- Fix (client): `openFileInSlot` 에 새 가드 추가 — `entry.kind !== 'file'` 이면 `not a regular file (...)` 또는 `broken symlink` 토스트로 정확한 사유 표시. 기존 "binary file not previewable" 메시지는 실제 file이지만 미리보기 불가인 경우만 유지.
+- 캐시 무효화: `public/sw.js` VERSION `tabterm-v22-file-pane-in-slot` → `tabterm-v23-junction-as-directory`. Ctrl+Shift+R 1회.
+- Tests: `file-explorer.test.js` 에 3개 추가 — junction-as-directory, file-symlink-as-file, dangling-symlink. 모두 best-effort (symlink 권한 없는 환경에선 early-return). 17/17 pass.
+- 보안: `listDirectoryAbsolute` 는 원래 auth-gated localhost 전용 (`file-explorer.js` 246-250 주석). `stat()` follow가 추가 권한을 주지 않음 — 사용자는 어차피 자기 셸로 그 경로를 읽을 수 있는 권한이 있다. Jailed `listDirectory` 변종에 적용해도 `assertNoSymlinkSegments` 가 여전히 traversal을 막으므로 jail escape 경로 확장은 없다 (junction을 디렉터리로 표시만 하고, 펼침 시도 시 `symlink-not-allowed` 로 거절되는 흐름은 종전과 동일).
+
+### Added — file pane in workspace slot (sidebar Explorer click opens viewer)
+
+- 사이드바 Explorer 탭에서 파일 클릭 → 워크스페이스 슬롯(L/R)에 새 `kind:'file'` pane 생성. 사용자가 말한 "탭 형태로 워크스페이스에 추가"를 기존 슬롯 시스템 재사용으로 구현 (별도 tab strip 신설 X). 같은 파일 재클릭 → 기존 슬롯 포커스. 슬롯 둘 다 차있고 cursor가 file pane을 가리킬 때만 교체. terminal pane은 detach만 (영구 파괴 X).
+- text 파일: `/api/fs/read` → `<pre class="fx-text">` raw. markdown 렌더링은 Phase 2 예정과 일관성 유지.
+- 이미지 / PDF: `/api/fs/preview` blob → `<img>` / `<iframe>`. close 시 `URL.revokeObjectURL`.
+- 서버 라우트는 v0.8.0의 `listDirectoryAbsolute` / `readTextFileAbsolute` / `streamPreviewAbsolute` 그대로 재사용. 신설 0.
+- file pane id는 `file:<uuid>` 형식 (PTY id와 충돌 방지). `closePane` 분기로 `/api/sessions/:id DELETE` 호출 스킵 + blob URL revoke.
+- file pane HTML은 session-tools에 close 버튼만 노출 (soft/restart/detach 비표시). statusbar는 path + content kind + read-only.
+- `public/app.js` 추가: `openFileInSlot`, `paneByFilePath`, `renderFilePaneBody`, `fileIconSvg`. 수정: `displayName`, `paneHtml`, `buildLayout`, `closePane`, Explorer 클릭 핸들러.
+- `public/styles.css` `.file-body` 섹션 추가. `.fx-text` / `.fx-preview-frame` 재사용 (modal viewer와 시각 일관성).
+- `public/sw.js` VERSION `tabterm-v21-file-explorer-phase1` → `tabterm-v22-file-pane-in-slot`. 브라우저 Ctrl+Shift+R 1회로 활성화.
+
+### Fixed — `WATCHDOG_AUTOSTART=false`가 silent ignore되던 ESM hoisting + dotenv 타이밍 버그
+
+- 증상: `.env`에 `WATCHDOG_AUTOSTART=false`로 명시했는데도 매번 tabterm 부팅 시 watchdog이 child로 spawn됨. 워치독은 죽은 subagent를 keep-alive하면서 `start "Worker-..." cmd /k start-ccx.bat` (watchdog.js:312) 로 visible cmd 창을 띄움 → 사용자가 키 입력할 때마다 cmd 창이 새로 뜨는 것처럼 보임. 직전 [Fixed — subagent 미실행 시에도 cmd 창 자동 팝업] 의 .env 변경만으로는 충분치 않았음 (사실 코드 자체가 .env를 못 읽고 있었던 것).
+- 원인: ESM 사양상 import된 모듈의 top-level 코드는 importer 본문 코드보다 **먼저** 평가됨. `server/watchdog.js` line 5 의 `const AUTOSTART = String(process.env.WATCHDOG_AUTOSTART ?? 'true') === 'true'` 는 `index.js` line 43에서 import되는 순간 평가됨. 그런데 `index.js` line 2의 `dotenv.config({override:true})` 는 본문 코드라 import들이 모두 끝난 뒤에야 실행됨 → AUTOSTART 평가 시점엔 `.env`가 아직 로드 안 됨 → `process.env.WATCHDOG_AUTOSTART = undefined` → `?? 'true'` fallback 발동 → AUTOSTART=true → spawn.
+- 검증: orphan watchdog (PID 33136)의 부모 = tabterm (PID 22272 `node server/index.js`). `.env=false`인데도 spawn된 정확한 증거.
+- Fix: env reads를 함수 안으로 옮겨 lazy 평가. `envAutostart()` / `envScriptPath()` / `envConfigPath()` / `envLogPath()` 헬퍼 4개 신설. `startWatchdog` 호출 시점엔 이미 dotenv가 적용된 후이므로 `.env` 값을 정확히 읽음.
+- Foot-gun 가드: 모듈-레벨 `const`로 되돌리면 정확히 같은 silent 버그가 재발하므로, 코드에 RCA 코멘트를 남겨 미래 개발자가 "왜 굳이 함수로?"하고 인라인하는 걸 차단.
+- 운영: 현재 떠있던 orphan watchdog은 수동 kill (PID 33136). 다음 `npm start`부터 fix가 자동 적용 (tabterm 기존 PTY 세션 보존 위해 즉시 재시작은 안 함).
+
+---
+
+### Added — global filesystem explorer tab
+
+- 사이드바에 Sessions / Explorer 두 탭 추가. Explorer 탭은 세션 폴더 jail 없이 `C:/` 이하 전체 트리 탐색.
+- 새 라우트: `GET /api/fs/drives`, `GET /api/fs/list`, `GET /api/fs/read`, `GET /api/fs/preview` — auth-gated, no folder jail.
+- `file-explorer.js`에 `listDirectoryAbsolute` / `readTextFileAbsolute` / `streamPreviewAbsolute` 추가. `resolveSafePath`의 jail 모델과 의도적으로 분리 (보안 결정 in-file 주석).
+- Explorer UI: 경로 입력창, ↑ 한 단계 위로, 트리 expand/collapse, 디렉터리 클릭 = 펼침, 파일 클릭 = 절대경로 표시.
+
+### Changed — kebab menu의 "Open files…" 폐기
+
+- 세션 폴더 jail 모달 진입점 제거. 글로벌 Explorer 탭이 대체.
+- `fx-modal` / `openFileExplorer` 코드는 dead-code로 남김 (revert 용이성). 차후 정리 가능.
+
+### Fixed — 폴더 삭제 "rm failed" 빈발
+
+- `DELETE /api/sessions/folders/:name`: rm 전에 매칭 세션의 PTY pid를 스냅샷 → `sessions.kill` 후 `taskkill /F /T /PID <pid>`로 ConPTY 자식 트리 강제 종료. 잔존 vim/tail/claude.exe가 cwd lock 잡는 경우 해소.
+- `rmWithRetry`: 5회 1.5s → 8회 25s exponential backoff. OneDrive/Defender 스캔 윈도우 + 느린 ConPTY teardown 커버.
+
+### Fixed — subagent 미실행 시에도 cmd 창 자동 팝업
+
+- `.env` `WATCHDOG_AUTOSTART=false` 기본화. 외부 `C:/workspace/watchdog/watchdog.js`가 tabterm 부팅 시 자동 spawn되면서 죽은 subagent를 `start cmd /k start-ccx.bat`로 살려내던 동작 차단.
+- watchdog 자체는 그대로 두므로 텔레그램 봇 자동복구가 필요하면 수동으로 `start-ccx-full-all.bat`/`start-watchdog-ccx-full.bat` 실행.
+
+---
+
 ## 0.8.0 — 2026-05-25
 
 ### Added — file explorer (Phase 1: read-only viewer)

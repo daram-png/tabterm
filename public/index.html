@@ -51,8 +51,21 @@
   <div class="shell">
     <!-- sidebar -->
     <aside class="sidebar" id="sidebar">
-      <div class="sidebar-list" id="sidebar-list"></div>
-      <div class="sidebar-foot">
+      <div class="sidebar-tabs" id="sidebar-tabs" role="tablist">
+        <button type="button" class="sidebar-tab active" data-tab="sessions" role="tab" aria-selected="true">Sessions</button>
+        <button type="button" class="sidebar-tab" data-tab="explorer" role="tab" aria-selected="false">Explorer</button>
+      </div>
+      <div class="sidebar-pane" id="sidebar-pane-sessions">
+        <div class="sidebar-list" id="sidebar-list"></div>
+      </div>
+      <div class="sidebar-pane hidden" id="sidebar-pane-explorer">
+        <div class="explorer-toolbar">
+          <input type="text" id="explorer-path-input" class="explorer-path-input" spellcheck="false" autocomplete="off" placeholder="C:/path/to/dir + Enter">
+          <button type="button" class="explorer-up" id="explorer-up" title="Up one level">↑</button>
+        </div>
+        <div class="explorer-tree" id="explorer-tree" aria-label="Filesystem tree"></div>
+      </div>
+      <div class="sidebar-foot" id="sidebar-foot-sessions">
         <div class="ws-add" id="btn-new-claude" title="Create new Claude session (HydraTeams proxy)">
           <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3.5 V12.5 M3.5 8 H12.5"/></svg>
           <span>+ Claude</span>
