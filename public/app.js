@@ -117,6 +117,265 @@ const state = {
   kebabMenu: null,
 };
 
+/* ---------- mobile mode ----------
+ * Phase-1 mobile UX: convert to single-pane fullscreen + drawer sidebar when
+ * vw <= 720 (matches CSS media query). Desktop UX is untouched — every change
+ * is gated on body.mobile, which this module toggles + the CSS keys off.
+ *
+ * No native shell, no separate codebase. Same DOM, same xterm instance, same
+ * WebSocket. Term elements are moved/hidden via display:none for non-active
+ * slot; fit-pane is skipped for hidden ones (fit on a 0-width host crashes).
+ */
+const MOBILE_MQ = window.matchMedia('(max-width: 720px)');
+function isMobile() { return MOBILE_MQ.matches; }
+
+let _applyMobileModeRaf = 0;
+function applyMobileMode() {
+  const mobile = isMobile();
+  const prev = document.body.classList.contains('mobile');
+  document.body.classList.toggle('mobile', mobile);
+  // leaving mobile -> close drawer so collapsed/open state doesn't leak
+  if (!mobile) {
+    document.getElementById('sidebar')?.classList.remove('open');
+    document.getElementById('sidebar-backdrop')?.classList.remove('open');
+    // also dismiss any open bottom sheet (Phase 2) since they have no desktop UX
+    if (typeof bsState !== 'undefined' && bsState.open) closeBottomSheet();
+  }
+  // Phase 2: sync bottom-nav visibility on every mode change.
+  try { syncBottomNavVisibility(); } catch {}
+  // only rebuild if the mode actually changed (avoid thrashing xterm on every resize tick)
+  if (prev !== mobile) {
+    try { buildLayout(); } catch (e) { console.error('applyMobileMode rebuild failed', e); }
+  }
+}
+function scheduleApplyMobileMode() {
+  if (_applyMobileModeRaf) cancelAnimationFrame(_applyMobileModeRaf);
+  _applyMobileModeRaf = requestAnimationFrame(() => { _applyMobileModeRaf = 0; applyMobileMode(); });
+}
+window.addEventListener('resize', scheduleApplyMobileMode);
+// matchMedia change is more reliable for orientation flips than resize alone
+if (MOBILE_MQ.addEventListener) MOBILE_MQ.addEventListener('change', scheduleApplyMobileMode);
+else if (MOBILE_MQ.addListener) MOBILE_MQ.addListener(scheduleApplyMobileMode); // legacy Safari
+
+/* ---------- haptic feedback ----------
+ * navigator.vibrate is only present on Android/Chromium (iOS Safari does not
+ * implement it; calls become no-ops with no error). that's fine — we treat
+ * haptics as a progressive enhancement, never a required interaction signal.
+ * passive-low intensity (8-12ms) only — long buzzes are intrusive on mobile.
+ */
+function haptic(pattern = 10) {
+  try { navigator.vibrate?.(pattern); } catch {}
+}
+
+/* ---------- bottom sheet (mobile, single instance reusable) ----------
+ * one sheet DOM lives in index.html; openBottomSheet({...}) refills its content
+ * and animates in. closeBottomSheet() animates out. exclusive — opening a new
+ * sheet first closes the current. backdrop tap / handle tap / close button all
+ * dismiss. Esc key works too (desktop dev only — no escape on iOS keyboard).
+ *
+ * not used on desktop. opening on desktop is a no-op (safety guard).
+ */
+// bsState.version: monotonic open-token. closeBottomSheet captures the version
+// at close-time; the post-transition hide only runs if the version matches
+// (i.e., no subsequent open happened in the meantime). prevents the race where
+// close→open→close-2 in rapid succession lets close-1's timer hide the now-open
+// sheet. (Peer review Y1.)
+const bsState = { open: false, version: 0, onClose: null, _previousActive: null, _hideTimer: 0 };
+
+function openBottomSheet({ title, body, actions, onClose }) {
+  if (!isMobile()) return; // safety
+  const sheet = document.getElementById('bottom-sheet');
+  if (!sheet) return;
+  // bump version + cancel any pending hide timer from a previous close
+  bsState.version += 1;
+  if (bsState._hideTimer) {
+    clearTimeout(bsState._hideTimer);
+    bsState._hideTimer = 0;
+  }
+  // Replace contents
+  const titleEl = document.getElementById('bs-title');
+  const bodyEl = document.getElementById('bs-body');
+  const actionsEl = document.getElementById('bs-actions');
+  if (titleEl) titleEl.textContent = title || '';
+  if (bodyEl) {
+    bodyEl.innerHTML = '';
+    // Peer review R2: only accept DOM nodes for body. String inputs are treated
+    // as plain text (textContent) — never innerHTML — so future callers can't
+    // accidentally introduce HTML injection sinks. If a future feature needs
+    // formatted markup, the caller must build the DOM tree explicitly.
+    if (body instanceof Node) bodyEl.appendChild(body);
+    else if (typeof body === 'string') bodyEl.textContent = body;
+  }
+  if (actionsEl) {
+    actionsEl.innerHTML = '';
+    if (Array.isArray(actions) && actions.length) {
+      actionsEl.hidden = false;
+      for (const a of actions) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn-sheet' + (a.secondary ? ' secondary' : '');
+        btn.textContent = a.label;
+        btn.addEventListener('click', () => {
+          haptic(8);
+          try { a.onClick?.(); } finally { if (a.dismiss !== false) closeBottomSheet(); }
+        });
+        actionsEl.appendChild(btn);
+      }
+    } else {
+      actionsEl.hidden = true;
+    }
+  }
+  bsState.onClose = onClose || null;
+  bsState._previousActive = document.activeElement;
+  // show
+  sheet.hidden = false;
+  sheet.setAttribute('aria-hidden', 'false');
+  // force layout so the transform transition kicks in
+  // eslint-disable-next-line no-unused-expressions
+  sheet.offsetHeight;
+  sheet.classList.add('open');
+  bsState.open = true;
+  haptic(6);
+  // Y4 lite: move initial focus into the sheet so keyboard users land inside.
+  // Full focus-trap (Tab/Shift+Tab cycling) is deferred to a Phase 3 a11y pass.
+  try {
+    const closeBtn = sheet.querySelector('.bottom-sheet-close');
+    closeBtn?.focus?.({ preventScroll: true });
+  } catch {}
+}
+
+function closeBottomSheet() {
+  const sheet = document.getElementById('bottom-sheet');
+  if (!sheet || !bsState.open) return;
+  const closingVersion = bsState.version;
+  sheet.classList.remove('open');
+  bsState.open = false;
+  if (bsState._hideTimer) clearTimeout(bsState._hideTimer);
+  // wait for transition (matches CSS 240ms) before hiding to keep the slide-out
+  // animation visible. The version check guards against a reopen happening
+  // mid-transition: if openBottomSheet bumped version since we closed, skip
+  // hiding (the new sheet content is already visible).
+  bsState._hideTimer = setTimeout(() => {
+    bsState._hideTimer = 0;
+    if (bsState.open) return;  // reopened before timeout — leave visible
+    if (bsState.version !== closingVersion) return;  // newer open happened
+    sheet.hidden = true;
+    sheet.setAttribute('aria-hidden', 'true');
+    const onClose = bsState.onClose;
+    bsState.onClose = null;
+    const prev = bsState._previousActive;
+    bsState._previousActive = null;
+    try { prev?.focus?.(); } catch {}
+    try { onClose?.(); } catch (e) { console.warn('[bottom-sheet] onClose error', e); }
+  }, 260);
+}
+
+// global delegated handler for backdrop / handle / X / data-bs-close="1" elements
+document.addEventListener('click', (e) => {
+  const closer = e.target.closest('[data-bs-close]');
+  if (closer && bsState.open) {
+    e.preventDefault();
+    closeBottomSheet();
+  }
+});
+// Esc closes (mostly for desktop debugging — iOS keyboard has no Esc key).
+// Peer review Y2: don't fight other modals. Skip if another modal/dialog is open
+// or if the event was already handled by something else. We also stopPropagation
+// after handling so other listeners (e.g., a future global Esc hook) don't see it.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (e.defaultPrevented) return;
+  if (!bsState.open) return;
+  // skip if another modal is visible — let it own Escape
+  const otherModal = document.querySelector('.fx-modal:not(.hidden), .wd-modal:not(.hidden), .prompt-overlay:not(.hidden)');
+  if (otherModal) return;
+  e.preventDefault();
+  e.stopPropagation();
+  closeBottomSheet();
+});
+
+/* ---------- command history (ime-bar send ring buffer) ----------
+ * Stored in localStorage as JSON array (most-recent first), capped at 50.
+ * Source: every ime-bar flushImeText(true) commit with non-empty text.
+ *
+ * Why send-only (not xterm onData stdin):
+ *   - PTY stdin includes password prompts + arrow keys + every keypress; capturing
+ *     it would leak secrets into client localStorage. ime-bar text is user-typed
+ *     and already plaintext.
+ *   - Mobile users primarily compose commands via the rail bar (hangul IME needs
+ *     it; English typing on phone keyboards too — onscreen kbd autocorrect mangles
+ *     direct xterm input). So this captures ~all mobile inputs in practice.
+ *
+ * The history sheet shows entries with a one-tap "fill" action that drops the
+ * text back into ime-bar (user can edit before send) — never auto-sends.
+ */
+const CMD_HISTORY_KEY = 'tabterm.mobile.cmdHistory';
+const CMD_HISTORY_MAX = 50;
+const CMD_HISTORY_ENTRY_MAX_CHARS = 4096;  // peer review B3: per-entry cap, ~4KB
+function cmdHistoryLoad() {
+  try {
+    const raw = localStorage.getItem(CMD_HISTORY_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.filter((x) => typeof x === 'string' && x.length).slice(0, CMD_HISTORY_MAX) : [];
+  } catch { return []; }
+}
+function cmdHistorySave(list) {
+  try { localStorage.setItem(CMD_HISTORY_KEY, JSON.stringify(list.slice(0, CMD_HISTORY_MAX))); } catch {}
+}
+function cmdHistoryPush(text) {
+  if (!text || typeof text !== 'string') return;
+  const trimmed = text.trim();
+  if (!trimmed) return;
+  // B3: a pasted megabyte can blow out localStorage and slow the sheet render.
+  // Truncate with a tail marker so the user can tell it was clipped.
+  const stored = trimmed.length > CMD_HISTORY_ENTRY_MAX_CHARS
+    ? trimmed.slice(0, CMD_HISTORY_ENTRY_MAX_CHARS) + ' …[truncated]'
+    : trimmed;
+  let list = cmdHistoryLoad();
+  // dedupe: if previous entry is identical, skip (no double-push on retries)
+  if (list[0] === stored) return;
+  list.unshift(stored);
+  list = list.slice(0, CMD_HISTORY_MAX);
+  cmdHistorySave(list);
+}
+function cmdHistoryClear() {
+  try { localStorage.removeItem(CMD_HISTORY_KEY); } catch {}
+}
+
+/* ---------- WS reconnect indicator ----------
+ * Per-pane WS lifecycle already exists (openWs in pane lifecycle). This module
+ * aggregates: any pane in reconnecting state -> 'reconnecting'; all closed -> 'offline';
+ * else 'online'. UI is a small color dot in the winchrome title bar.
+ *
+ * State source of truth is per-pane (pane.wsStatus). renderWsStatus() reads all
+ * panes and picks the worst state. Phase 2 also adds an auto-reconnect attempt
+ * on unexpected close (graceful exit code messages keep their existing path —
+ * we only fight true network drops).
+ */
+const WS_RECONNECT_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000];
+function renderWsStatus() {
+  const el = document.getElementById('ws-status');
+  if (!el) return;
+  // panes that own a WS (skip file panes and dead panes)
+  const wsP = state.panes.filter((p) => p.kind !== 'file' && !p.dead);
+  if (!wsP.length) {
+    el.dataset.state = 'online';
+    el.title = 'WebSocket online';
+    return;
+  }
+  let worst = 'online';
+  for (const p of wsP) {
+    const s = p.wsStatus || 'online';
+    if (s === 'offline') { worst = 'offline'; break; }
+    if (s === 'reconnecting' && worst !== 'offline') worst = 'reconnecting';
+  }
+  el.dataset.state = worst;
+  el.title = worst === 'online' ? 'WebSocket online'
+    : worst === 'reconnecting' ? 'Reconnecting…'
+    : 'Disconnected — tap a pane to retry';
+}
+
 /* ---------- helpers ---------- */
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
@@ -684,8 +943,19 @@ function renderSlotStrip() {
     chip.classList.toggle('focused', i === state.activeSlot && !!pid);
     chip.classList.toggle('empty', !pid);
     chip.querySelector('.slot-label').textContent = p ? displayName(p) : 'empty';
-    chip.onclick = pid ? () => { state.activeSlot = i; renderSidebar(); renderSlotStrip(); focusActivePane(paneById(pid)); } : null;
+    chip.onclick = pid ? () => {
+      state.activeSlot = i;
+      // mobile: swap which slot's cell is visible — needs buildLayout. desktop
+      // shows both panes side by side so no rebuild needed.
+      if (isMobile()) buildLayout();
+      renderSidebar();
+      renderSlotStrip();
+      renderBottomNav();
+      focusActivePane(paneById(pid));
+    } : null;
   }
+  // Phase 2: mirror slot state to mobile bottom nav (no-op on desktop)
+  renderBottomNav();
 }
 
 /* ---------- terminal ---------- */
@@ -787,14 +1057,24 @@ function claudeMascotSvg(size) {
 
 /* ---------- layout ---------- */
 function buildLayout() {
+  const mobile = isMobile();
   if (state.split) { try { state.split.destroy(); } catch {} state.split = null; }
   const root = $('#workspace');
   root.innerHTML = '';
 
+  // mobile: auto-close drawer whenever layout (re)builds. user-initiated layout
+  // changes typically come from sidebar/slot-strip taps, where closing the
+  // drawer is the desired next step. on init the drawer is already closed.
+  if (mobile) {
+    document.getElementById('sidebar')?.classList.remove('open');
+    document.getElementById('sidebar-backdrop')?.classList.remove('open');
+  }
+
   const filled = state.slots.map((id, i) => id ? { id, idx: i, pane: paneById(id) } : null).filter(Boolean);
   if (!filled.length) {
-    root.innerHTML = '<div class="empty-state" style="margin:auto; color:var(--muted); font-family:Geist Mono, monospace; font-size:12px;">no session in any slot — click a worker on the left, or "New session"</div>';
+    root.innerHTML = '<div class="empty-state" style="margin:auto; color:var(--muted); font-family:Geist Mono, monospace; font-size:12px;">no session in any slot — click a subagent on the left, or "New session"</div>';
     renderSlotStrip();
+    renderBottomNav();
     return;
   }
 
@@ -807,6 +1087,13 @@ function buildLayout() {
     const cell = document.createElement('div');
     cell.className = 'pane' + (idx === state.activeSlot ? ' focused' : '');
     cell.dataset.paneId = id;
+    // mobile: hide non-active slot cell. element still in DOM so xterm
+    // term.element + WS + ring-buffer stay alive; switching the slot-chip
+    // just toggles display.
+    if (mobile && idx !== state.activeSlot) {
+      cell.style.display = 'none';
+      cell.dataset.mobileHidden = 'true';
+    }
     cell.innerHTML = paneHtml(pane, idx === 0 ? 'slot L' : 'slot R');
     cell.addEventListener('mousedown', () => {
       state.activeSlot = idx;
@@ -828,7 +1115,8 @@ function buildLayout() {
     pane.cellEl = cell;
   }
 
-  if (filled.length > 1) {
+  // desktop only: Split.js gutter for 2-pane layout. mobile shows one pane at a time.
+  if (!mobile && filled.length > 1) {
     state.split = Split([...wrap.children], {
       sizes: [50, 50], minSize: 200, gutterSize: 1, direction: 'horizontal',
       onDragEnd: () => filled.forEach(({ pane }) => fitPane(pane)),
@@ -841,8 +1129,17 @@ function buildLayout() {
       continue;
     }
     const host = pane.cellEl.querySelector('.terminal');
+    const hidden = pane.cellEl.style.display === 'none';
+    // mobile defer: don't term.open() on a hidden host — xterm measures the
+    // cell glyph via getBoundingClientRect which returns 0 on display:none,
+    // producing a broken cursor / wrong size. instead, leave _opened=false
+    // and let the next buildLayout (triggered by slot-chip tap) open it
+    // once the host is visible.
+    if (hidden && !pane.term._opened) continue;
     if (!pane.term._opened) { pane.term.open(host); pane.term._opened = true; }
     else { host.appendChild(pane.term.element); }
+    // skip fit for already-opened hidden pane — fit needs visible host.
+    if (hidden) continue;
     fitPane(pane);
   }
 
@@ -877,22 +1174,62 @@ function sendWs(p, obj) {
 }
 
 function openWs(p) {
+  // Peer review R3 — defensive lifecycle:
+  //  1) Cancel any pending retry timer so a delayed reconnect doesn't fight us.
+  //  2) Close any existing socket (CONNECTING or OPEN) before opening a new one.
+  //     Otherwise the old socket's close handler can schedule a NEW retry on top
+  //     of our manual reopen, producing duplicate sockets writing the same PTY.
+  //  3) Mint a generation token; every handler captures the token at attach time
+  //     and bails out if the pane has moved past it. Guards against late events
+  //     from old sockets corrupting state assigned to the new one.
+  //  4) term.onData is attached ONCE per pane (guard p._dataPiped). Re-attaching
+  //     on every reconnect would duplicate every keystroke send.
+  if (p._wsRetryTimer) {
+    clearTimeout(p._wsRetryTimer);
+    p._wsRetryTimer = 0;
+  }
+  if (p.ws) {
+    try {
+      // mark old socket as superseded so its close handler doesn't trigger retry
+      p.ws._tabterm_superseded = true;
+      if (p.ws.readyState === 0 || p.ws.readyState === 1) p.ws.close();
+    } catch {}
+  }
+  const gen = (p._wsGen || 0) + 1;
+  p._wsGen = gen;
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const url = `${proto}://${location.host}/ws/pty?sessionId=${encodeURIComponent(p.sessionId)}`;
   const ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
+  ws._tabterm_gen = gen;
   p.ws = ws;
+  // Phase 2: WS lifecycle status for the winchrome reconnect indicator.
+  // 'online' = open, 'reconnecting' = retry scheduled, 'offline' = retries
+  // exhausted or PTY exited cleanly. Aggregated by renderWsStatus().
+  p.wsStatus = 'reconnecting';
+  renderWsStatus();
   const decoder = new TextDecoder('utf-8', { fatal: false });
-  ws.addEventListener('open', () => fitPane(p));
+  const stale = () => ws._tabterm_gen !== p._wsGen;  // capture is by closure on ws
+  ws.addEventListener('open', () => {
+    if (stale()) return;
+    p.wsStatus = 'online';
+    p._wsRetry = 0;  // reset backoff cursor on successful connect
+    renderWsStatus();
+    fitPane(p);
+  });
   ws.addEventListener('message', (ev) => {
+    if (stale()) return;
     if (typeof ev.data === 'string') {
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === 'exit') {
           p.dead = true;
           p.exitCode = msg.code;
+          p._wsExitedCleanly = true;  // suppresses reconnect on close
+          p.wsStatus = 'offline';
           p.term.write(`\r\n\x1b[33m[exit ${msg.code ?? '?'}]  ↻ to restart\x1b[0m\r\n`);
           renderSidebar();
+          renderWsStatus();
           if (p.cellEl) {
             const sb = p.cellEl.querySelector('.statusbar .sb-right');
             if (sb) sb.innerHTML = `<span class="dot dead"></span>exit ${msg.code ?? '?'}`;
@@ -904,13 +1241,54 @@ function openWs(p) {
     }
   });
   ws.addEventListener('close', () => {
+    if (stale() || ws._tabterm_superseded) {
+      // a newer socket has taken over; let it manage retry state
+      return;
+    }
     try {
       const tail = decoder.decode();
       if (tail) p.term.write(tail);
     } catch {}
-    p.term.write('\r\n\x1b[2m[disconnected]\x1b[0m\r\n');
+    // Two close paths:
+    //   1) Server sent {type:'exit'} -> _wsExitedCleanly=true -> stay offline, user restarts via UI.
+    //   2) Network drop / server crash -> auto-reconnect with exponential backoff.
+    // We cap at 5 attempts (~30s total). After that the pane stays 'offline'.
+    if (p._wsExitedCleanly || p.dead) {
+      p.wsStatus = 'offline';
+      p.term.write('\r\n\x1b[2m[disconnected]\x1b[0m\r\n');
+      renderWsStatus();
+      return;
+    }
+    const attempt = (p._wsRetry || 0);
+    if (attempt >= WS_RECONNECT_BACKOFF_MS.length) {
+      p.wsStatus = 'offline';
+      // Y11: message matches actual behavior. We don't have a tap-to-retry path
+      // yet — exhaustion is terminal; user closes the pane and reopens.
+      p.term.write('\r\n\x1b[31m[disconnected — reconnect attempts exhausted; close pane and reopen]\x1b[0m\r\n');
+      renderWsStatus();
+      return;
+    }
+    const delay = WS_RECONNECT_BACKOFF_MS[attempt];
+    p._wsRetry = attempt + 1;
+    p.wsStatus = 'reconnecting';
+    p.term.write(`\r\n\x1b[33m[reconnecting in ${Math.round(delay / 1000)}s... ${attempt + 1}/${WS_RECONNECT_BACKOFF_MS.length}]\x1b[0m\r\n`);
+    renderWsStatus();
+    clearTimeout(p._wsRetryTimer);
+    p._wsRetryTimer = setTimeout(() => {
+      p._wsRetryTimer = 0;
+      // pane might've been closed during the wait window; guard
+      if (p.dead || !paneById(p.id)) return;
+      // someone called openWs manually in the meantime -> different gen, bail
+      if (p._wsGen !== gen) return;
+      try { openWs(p); } catch (e) { console.error('[ws-reconnect] open failed', e); }
+    }, delay);
   });
-  p.term.onData((d) => sendWs(p, { type: 'input', data: d }));
+  // Peer review R3 / Y12: attach term.onData exactly ONCE per pane. The handler
+  // closes over `p`, not over `ws`, so it always sends to the current socket.
+  if (!p._dataPiped) {
+    p._dataPiped = true;
+    p.term.onData((d) => sendWs(p, { type: 'input', data: d }));
+  }
 }
 
 /* ---------- pane lifecycle ---------- */
@@ -1149,7 +1527,24 @@ $('#btn-kill').addEventListener('click', () => {
   const id = state.slots[state.activeSlot];
   if (id && confirm('현재 슬롯의 세션을 강제 종료할까요?')) closePane(id);
 });
-$('#btn-sidebar').addEventListener('click', () => $('#sidebar').classList.toggle('collapsed'));
+$('#btn-sidebar').addEventListener('click', () => {
+  // mobile: off-canvas drawer (.open + backdrop). desktop: width-collapse (.collapsed).
+  // two separate classes so resizing the window between modes doesn't get stuck.
+  if (isMobile()) {
+    const sb = $('#sidebar');
+    const bd = $('#sidebar-backdrop');
+    const opening = !sb.classList.contains('open');
+    sb.classList.toggle('open', opening);
+    bd?.classList.toggle('open', opening);
+  } else {
+    $('#sidebar').classList.toggle('collapsed');
+  }
+});
+// mobile drawer: tap backdrop -> close
+$('#sidebar-backdrop')?.addEventListener('click', () => {
+  $('#sidebar').classList.remove('open');
+  $('#sidebar-backdrop').classList.remove('open');
+});
 $('#btn-hydra-recheck').addEventListener('click', async () => {
   toast('checking HydraTeams...', 'amber', 2000);
   try {
@@ -1357,6 +1752,17 @@ function initImeBar() {
     if (!v && !withEnter) return;
     if (v) imeSendData(v);
     if (withEnter) imeSendData('\r');
+    // Mobile shell Phase 2: persist user-typed text to cmd history ring buffer.
+    // Mobile-only — the history sheet only exists on mobile, and the localStorage
+    // key (`tabterm.mobile.cmdHistory`) explicitly states scope. Gate with isMobile()
+    // so desktop users who use the ime-bar don't unexpectedly persist into a key
+    // they can never view. (Peer review R1.)
+    // Only push when withEnter=true (committed line) and text non-empty. blur/aux
+    // flushes (no \r) are NOT recorded — they're mid-composition saves to PTY,
+    // not user-committed commands.
+    if (withEnter && v && isMobile()) {
+      try { cmdHistoryPush(v); } catch (e) { console.warn('[cmd-history] push failed', e); }
+    }
     input.value = '';
     imeTargetPaneId = null;
   }
@@ -1497,6 +1903,10 @@ async function init() {
     fetchFolders(),
   ]);
 
+  // apply mobile mode BEFORE first buildLayout so split.js / 1-pane decision
+  // is correct from the start (avoids a one-frame desktop layout flash on phone).
+  document.body.classList.toggle('mobile', isMobile());
+
   buildLayout();
   renderSidebar();
   renderSlotStrip();
@@ -1507,6 +1917,367 @@ async function init() {
 
   // iOS IME rail (no-op on non-iPad)
   initImeBar();
+
+  // mobile shell Phase 2 — bottom nav + swipe gesture. these init unconditionally
+  // and self-guard with isMobile() at runtime. on desktop they sit dormant
+  // (bottom-nav has [hidden], swipe handler short-circuits).
+  initBottomNav();
+  initSwipeGesture();
+  renderWsStatus();
+}
+
+/* ---------- bottom nav (mobile-only) ---------- */
+function initBottomNav() {
+  const nav = document.getElementById('bottom-nav');
+  if (!nav) return;
+  // expose on phone, hide on desktop. applyMobileMode toggles via syncBottomNavVisibility.
+  syncBottomNavVisibility();
+  // wire delegated clicks once
+  nav.addEventListener('click', (e) => {
+    const btn = e.target.closest('.bn-btn');
+    if (!btn) return;
+    const act = btn.dataset.act;
+    haptic(8);
+    onBottomNavAction(act);
+  });
+  // re-bind on mobile mode flips (the nav stays mounted; we just toggle [hidden])
+  if (MOBILE_MQ.addEventListener) MOBILE_MQ.addEventListener('change', syncBottomNavVisibility);
+}
+
+function syncBottomNavVisibility() {
+  const nav = document.getElementById('bottom-nav');
+  if (!nav) return;
+  if (isMobile()) {
+    nav.hidden = false;
+    renderBottomNav();
+  } else {
+    nav.hidden = true;
+    // also close any open sheet — desktop has no sheet UX
+    if (bsState.open) closeBottomSheet();
+  }
+}
+
+function renderBottomNav() {
+  const nav = document.getElementById('bottom-nav');
+  if (!nav || nav.hidden) return;
+  // slot chips reflect current slot occupants
+  for (let i = 0; i < 2; i++) {
+    const btn = nav.querySelector(`[data-act="slot-${i}"]`);
+    if (!btn) continue;
+    const pid = state.slots[i];
+    const pane = pid ? paneById(pid) : null;
+    const isActive = i === state.activeSlot && !!pid;
+    btn.classList.toggle('empty', !pid);
+    btn.classList.toggle('active', isActive);
+    const lbl = btn.querySelector('.bn-slot-label');
+    if (lbl) lbl.textContent = pane ? displayName(pane) : 'empty';
+    // Peer review Y3 + B5: expose state + descriptive label to assistive tech.
+    // aria-pressed marks toggle state; aria-current="page" marks active context.
+    btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    if (isActive) btn.setAttribute('aria-current', 'page');
+    else btn.removeAttribute('aria-current');
+    const slotLetter = i === 0 ? 'L' : 'R';
+    const labelText = pane ? displayName(pane) : 'empty';
+    btn.setAttribute('aria-label', `Slot ${slotLetter}: ${labelText}${isActive ? ', active' : ''}`);
+  }
+}
+
+function onBottomNavAction(act) {
+  switch (act) {
+    case 'sidebar': {
+      // Peer review Y9: guard against missing sidebar (defensive — should always exist)
+      const sb = document.getElementById('sidebar');
+      if (!sb) return;
+      const bd = document.getElementById('sidebar-backdrop');
+      const opening = !sb.classList.contains('open');
+      sb.classList.toggle('open', opening);
+      bd?.classList.toggle('open', opening);
+      break;
+    }
+    case 'slot-0':
+    case 'slot-1': {
+      const idx = act === 'slot-0' ? 0 : 1;
+      const pid = state.slots[idx];
+      if (!pid) {
+        // empty slot tap -> open + session picker (sets activeSlot to this idx)
+        state.activeSlot = idx;
+        openNewSessionSheet(idx);
+        return;
+      }
+      state.activeSlot = idx;
+      buildLayout();  // swap visible slot
+      renderSidebar();
+      renderSlotStrip();
+      renderBottomNav();
+      focusActivePane(paneById(pid));
+      break;
+    }
+    case 'cmds':
+      openCmdHistorySheet();
+      break;
+    case 'more':
+      openMoreMenuSheet();
+      break;
+    default:
+      console.warn('[bottom-nav] unknown action', act);
+  }
+}
+
+/* ---------- + session bottom sheet (mobile) ----------
+ * Lists subagent-0..N (with current live label) and the two new-engine creators
+ * (+ Claude / + OpenCode). Tapping fills the given slotIndex (default activeSlot).
+ * Reuses existing addPaneFromServer / new-session flows under the hood — no new
+ * server routes.
+ */
+function openNewSessionSheet(targetSlot) {
+  if (!isMobile()) return;
+  const slot = (typeof targetSlot === 'number') ? targetSlot : state.activeSlot;
+  const wrap = document.createElement('div');
+
+  // section: subagents
+  const subHead = document.createElement('div');
+  subHead.className = 'bs-section';
+  subHead.textContent = 'Subagents';
+  wrap.appendChild(subHead);
+
+  const subWrap = document.createElement('div');
+  const count = state.subagentsCount || 8;
+  for (let i = 0; i < count; i++) {
+    const existing = paneByWorker(i);
+    const label = state.subagentLabels?.[i] || `${state.subagentPrefix || 'subagent-'}${i}`;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'bs-item';
+    btn.innerHTML = `
+      <span class="bs-item-icon">${i}</span>
+      <span class="bs-item-main">
+        <span class="bs-item-title">${escapeHtml(label)}</span>
+        <span class="bs-item-sub">${existing ? (existing.dead ? 'exited' : 'live') : 'not running'}</span>
+      </span>
+    `;
+    btn.addEventListener('click', () => {
+      closeBottomSheet();
+      handleMobileSubagentPick(i, slot);
+    });
+    subWrap.appendChild(btn);
+  }
+  wrap.appendChild(subWrap);
+
+  // section: new engines
+  const engHead = document.createElement('div');
+  engHead.className = 'bs-section';
+  engHead.textContent = 'New session';
+  wrap.appendChild(engHead);
+
+  for (const eng of [
+    { id: 'claude', label: '+ Claude', sub: 'HydraTeams proxy' },
+    { id: 'opencode', label: '+ OpenCode', sub: 'Nopersb proxy' },
+  ]) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'bs-item';
+    btn.innerHTML = `
+      <span class="bs-item-icon">+</span>
+      <span class="bs-item-main">
+        <span class="bs-item-title">${escapeHtml(eng.label)}</span>
+        <span class="bs-item-sub">${escapeHtml(eng.sub)}</span>
+      </span>
+    `;
+    btn.addEventListener('click', () => {
+      closeBottomSheet();
+      // Peer review Y8: lock activeSlot to the slot the user tapped from BEFORE
+      // delegating to the new-session button. Otherwise the spawn lands in
+      // whichever slot was previously focused, which may not be `slot`.
+      state.activeSlot = slot;
+      // trigger the existing sidebar button — keeps a single source of truth
+      const elId = eng.id === 'claude' ? 'btn-new-claude' : 'btn-new-opencode';
+      document.getElementById(elId)?.click();
+    });
+    wrap.appendChild(btn);
+  }
+
+  openBottomSheet({ title: `Slot ${slot === 0 ? 'L' : 'R'} — add session`, body: wrap });
+}
+
+function handleMobileSubagentPick(idx, slot) {
+  const existing = paneByWorker(idx);
+  if (existing) {
+    state.slots[slot] = existing.id;
+    state.activeSlot = slot;
+    buildLayout();
+    renderSidebar();
+    renderSlotStrip();
+    renderBottomNav();
+    focusActivePane(existing);
+    return;
+  }
+  // not running — defer to existing sidebar click handler to keep spawn logic
+  // single-sourced. The handler is async; finding it requires the sidebar list
+  // node, which renderSidebar() generates. We synthesise a click on the matching
+  // row if present, else toast a hint.
+  const row = document.querySelector(`#sidebar-list [data-worker-index="${idx}"]`);
+  if (row) {
+    row.click();
+  } else {
+    toast(`subagent-${idx} not yet listed — open Sessions panel`, 'amber', 3000);
+  }
+}
+
+/* ---------- command history bottom sheet ---------- */
+function openCmdHistorySheet() {
+  if (!isMobile()) return;
+  const list = cmdHistoryLoad();
+  const wrap = document.createElement('div');
+  if (!list.length) {
+    const empty = document.createElement('div');
+    empty.className = 'bs-empty';
+    empty.textContent = 'No commands yet. Type via the input bar — committed lines (Enter) are saved here.';
+    wrap.appendChild(empty);
+  } else {
+    for (const text of list) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'bs-cmd-row';
+      row.innerHTML = `<span class="bs-cmd-text"></span><span class="bs-cmd-fill">↑ fill</span>`;
+      row.querySelector('.bs-cmd-text').textContent = text;
+      row.addEventListener('click', () => {
+        const input = document.getElementById('ime-input');
+        if (input) {
+          input.value = text;
+          input.focus();
+        }
+        closeBottomSheet();
+      });
+      wrap.appendChild(row);
+    }
+  }
+  openBottomSheet({
+    title: `Command history (${list.length})`,
+    body: wrap,
+    actions: list.length ? [
+      { label: 'Clear all', secondary: true, onClick: () => { cmdHistoryClear(); openCmdHistorySheet(); }, dismiss: false },
+    ] : null,
+  });
+}
+
+/* ---------- more menu bottom sheet ---------- */
+function openMoreMenuSheet() {
+  if (!isMobile()) return;
+  const wrap = document.createElement('div');
+  const items = [
+    { id: 'wd-status', title: 'Watchdog status', sub: 'subagent keep-alive log', click: () => document.getElementById('btn-wd-status')?.click() },
+    { id: 'cleanup', title: 'Cleanup zombies', sub: 'kill orphan bun/claude/node', click: () => document.getElementById('btn-cleanup-zombies')?.click() },
+    { id: 'boot-all', title: 'Boot all subagents', sub: '0..N', click: () => document.getElementById('btn-boot-all')?.click() },
+    { id: 'soft-stop', title: 'Send Ctrl+C', sub: 'to active pane', click: () => document.getElementById('btn-soft-stop')?.click() },
+    { id: 'kill', title: 'Force kill active', sub: 'destroy current session', danger: true, click: () => document.getElementById('btn-kill')?.click() },
+    { id: 'logout', title: 'Logout', sub: '', danger: true, click: () => document.getElementById('btn-logout')?.click() },
+  ];
+  for (const it of items) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'bs-item' + (it.danger ? ' danger' : '');
+    btn.innerHTML = `
+      <span class="bs-item-icon">${it.id === 'logout' ? '⇥' : it.id === 'kill' ? '✕' : '·'}</span>
+      <span class="bs-item-main">
+        <span class="bs-item-title">${escapeHtml(it.title)}</span>
+        ${it.sub ? `<span class="bs-item-sub">${escapeHtml(it.sub)}</span>` : ''}
+      </span>
+    `;
+    btn.addEventListener('click', () => {
+      closeBottomSheet();
+      // small delay so sheet close anim doesn't fight the followup modal
+      setTimeout(() => { try { it.click(); } catch (e) { console.error('[more-menu]', e); } }, 280);
+    });
+    wrap.appendChild(btn);
+  }
+  openBottomSheet({ title: 'More', body: wrap });
+}
+
+/* ---------- swipe gesture (mobile L↔R slot swap) ----------
+ * Pointer events with horizontal threshold + velocity. Skipped when:
+ *   - not mobile mode
+ *   - swipe starts within 24px of left/right edge (reserve for OS back-gesture
+ *     + sidebar drawer open from edge — though we don't bind drawer-from-edge
+ *     here, leaving the corridor protects future use and iOS Safari back nav)
+ *   - swipe starts on a button/input/textarea (text selection etc.)
+ *   - both slots not filled (nothing to swap to)
+ *   - vertical movement dominant (likely scroll, not horizontal swipe)
+ */
+function initSwipeGesture() {
+  const ws = document.getElementById('workspace');
+  if (!ws) return;
+  const EDGE_PX = 24;
+  const H_THRESHOLD_PX = 60;
+  const V_REJECT_RATIO = 0.6;  // |dy| > 0.6 * |dx| -> treat as scroll, skip
+  const VELOCITY_THRESHOLD = 0.4;  // px/ms — fast flicks override distance threshold
+
+  // Peer review Y6: swipe handler must not interfere with xterm text selection,
+  // ime-bar / sidebar drawer, or active text selections. We additionally check
+  // window.getSelection() at end-of-swipe so a horizontal drag that *created*
+  // a selection during the gesture doesn't also swap slots.
+  const MIN_DISTANCE_FLOOR = 32;  // Y7: absolute distance floor below which no swipe (even fast flicks)
+  let active = null;
+  ws.addEventListener('pointerdown', (e) => {
+    if (!isMobile()) return;
+    if (e.pointerType !== 'touch') return;  // ignore mouse (desktop dev)
+    // only consider when both slots are filled — otherwise swipe is a no-op intent
+    if (!(state.slots[0] && state.slots[1])) return;
+    // skip if touching interactive elements (buttons, links, inputs).
+    // .xterm-screen (terminal text body) is also skipped — terminal users expect
+    // tap-to-select / drag-to-select. The swipe corridor is the pane gutters
+    // and statusbar/sessionheader bands, not the terminal body itself.
+    if (e.target.closest('button, input, textarea, a, .xterm-helper-textarea, .xterm-screen, .bn-btn, .ws-kebab-btn, .bottom-sheet, .ime-bar')) return;
+    const rect = ws.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    if (x < EDGE_PX || x > rect.width - EDGE_PX) return;
+    active = {
+      startX: e.clientX, startY: e.clientY,
+      lastX: e.clientX, lastY: e.clientY,
+      startT: performance.now(),
+      pointerId: e.pointerId,
+    };
+  }, { passive: true });
+
+  ws.addEventListener('pointermove', (e) => {
+    if (!active || e.pointerId !== active.pointerId) return;
+    active.lastX = e.clientX;
+    active.lastY = e.clientY;
+  }, { passive: true });
+
+  function endSwipe(e) {
+    if (!active || e.pointerId !== active.pointerId) return;
+    const dx = active.lastX - active.startX;
+    const dy = active.lastY - active.startY;
+    const dt = performance.now() - active.startT;
+    active = null;
+    const adx = Math.abs(dx), ady = Math.abs(dy);
+    if (ady > adx * V_REJECT_RATIO) return;  // dominant vertical -> scroll, ignore
+    const velocity = adx / Math.max(dt, 1);  // px/ms
+    // Y7: distance floor — accidental short-fast flicks (e.g. touch drift while
+    // typing) shouldn't swap panes. Even if velocity is high, distance must
+    // clear MIN_DISTANCE_FLOOR (32px) before we honor the swipe.
+    if (adx < MIN_DISTANCE_FLOOR) return;
+    if (adx < H_THRESHOLD_PX && velocity < VELOCITY_THRESHOLD) return;
+    // Y6 followup: if a text selection exists (likely created by this gesture
+    // crossing terminal text or other selectable content), don't swap.
+    try {
+      const sel = window.getSelection?.();
+      if (sel && sel.toString().length > 0) return;
+    } catch {}
+    // dx>0 = right swipe -> show prev slot (L); dx<0 = left swipe -> show R
+    const target = dx > 0 ? 0 : 1;
+    if (state.activeSlot === target) return;
+    if (!state.slots[target]) return;
+    haptic([6, 4, 6]);
+    state.activeSlot = target;
+    buildLayout();
+    renderSidebar();
+    renderSlotStrip();
+    renderBottomNav();
+    focusActivePane(paneById(state.slots[target]));
+  }
+  ws.addEventListener('pointerup', endSwipe, { passive: true });
+  ws.addEventListener('pointercancel', endSwipe, { passive: true });
 }
 
 /* ---------- file explorer (Phase 1: read-only viewer) ---------- */

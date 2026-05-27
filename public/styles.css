@@ -680,6 +680,406 @@ body.ios-ime .workspace { padding-bottom: 120px; }
   .session-icon { width: 26px; height: 26px; }
 }
 
+/*
+ * ─── mobile mode (body.mobile, toggled by JS isMobile()) ───
+ *
+ * Strategy: sidebar becomes off-canvas drawer (left slide + backdrop);
+ * workspace shows ONLY the active slot's pane (Split.js skipped); winchrome
+ * compacted to a hamburger-only header; toolbar slot-chips become tab switcher.
+ *
+ * Desktop behavior is intentionally untouched — every rule lives under
+ * body.mobile so removing the class restores the original UX exactly.
+ */
+
+/* hide the backdrop element entirely on desktop */
+.sidebar-backdrop { display: none; }
+
+body.mobile {
+  /* honor iPhone notch / Dynamic Island / home indicator */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+}
+
+/* app shell: safe-area on left/right too (landscape notch) */
+body.mobile .app {
+  padding-top: 0; /* winchrome handles top safe-area itself */
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+}
+
+/* winchrome: keep but compact, push under notch */
+body.mobile .winchrome {
+  height: calc(38px + var(--safe-top));
+  padding: var(--safe-top) 10px 0;
+  background: #0a0a0a;
+}
+body.mobile .winchrome .wc-tools .btn { width: 34px; height: 34px; }
+body.mobile .winchrome .wc-tools .btn svg { width: 18px; height: 18px; }
+/* hydra recheck button noise on phone — hide */
+body.mobile #btn-hydra-recheck { display: none; }
+body.mobile .winchrome .wc-title { font-size: 13px; }
+
+/* sidebar: off-canvas drawer */
+body.mobile .sidebar {
+  position: fixed;
+  top: calc(38px + var(--safe-top));
+  bottom: 0;
+  left: 0;
+  width: min(86vw, 320px);
+  transform: translateX(-100%);
+  transition: transform 220ms ease;
+  z-index: 1100;
+  border-right: 1px solid var(--line);
+  padding-bottom: var(--safe-bottom);
+}
+body.mobile .sidebar.open { transform: translateX(0); }
+/* desktop .collapsed class is a no-op in mobile (drawer uses .open) */
+body.mobile .sidebar.collapsed { width: min(86vw, 320px); border-right: 1px solid var(--line); overflow: visible; }
+
+/* backdrop */
+body.mobile .sidebar-backdrop {
+  display: block;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 1050;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms ease;
+}
+body.mobile .sidebar-backdrop.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* main column: full width, no sidebar reserve */
+body.mobile .shell { display: block; height: 100%; }
+body.mobile .main { width: 100%; height: 100%; display: flex; flex-direction: column; }
+
+/* toolbar: slot-strip becomes the active-pane switcher; actions stay */
+body.mobile .toolbar {
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 8px;
+  min-height: 44px;
+}
+body.mobile .slot-strip { flex: 1; min-width: 0; gap: 4px; }
+body.mobile .slot-chip {
+  flex: 1; min-width: 0;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+body.mobile .slot-chip .slot-label {
+  max-width: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+body.mobile .actions { gap: 4px; }
+body.mobile .actions .btn { width: 34px; height: 34px; }
+body.mobile .actions .btn svg { width: 16px; height: 16px; }
+/* hide low-priority desktop buttons on phone */
+body.mobile #btn-boot-all,
+body.mobile #btn-cleanup-zombies,
+body.mobile #btn-wd-status { display: none; }
+
+/* workspace: 1-pane fullscreen, no split gutter */
+body.mobile .workspace { flex: 1; min-height: 0; }
+body.mobile .split.row { display: block; height: 100%; }
+body.mobile .split.row > .gutter { display: none !important; }
+body.mobile .pane { width: 100% !important; height: 100% !important; }
+/* JS hides non-active panes via inline display:none; this is fallback only */
+body.mobile .pane[data-mobile-hidden="true"] { display: none !important; }
+
+/* session header inside pane: smaller on phone */
+body.mobile .session-header { height: 42px; padding: 0 8px; gap: 8px; }
+body.mobile .session-tools .btn { width: 30px; height: 30px; }
+
+/* ime-bar already handles safe-area-inset-bottom — make sure it sits above home indicator */
+body.mobile .ime-bar {
+  padding-bottom: max(8px, var(--safe-bottom));
+}
+
+/* fx-modal / wd-modal in mobile: full-screen for better touch */
+body.mobile .fx-modal,
+body.mobile .wd-modal {
+  padding: 0;
+}
+body.mobile .fx-card,
+body.mobile .wd-modal-card {
+  border-radius: 0; width: 100%; height: 100%;
+}
+
+/* xterm: bump font on small screens for readability */
+body.mobile .xterm .xterm-rows { font-size: 12px !important; }
+
+/* prevent iOS pull-to-refresh / overscroll bouncing in standalone PWA */
+body.mobile { overscroll-behavior: contain; }
+
+/*
+ * ─── mobile shell Phase 2 (bottom nav, bottom sheet, swipe, splash, WS, haptic) ───
+ *
+ * All rules below are inside body.mobile or scoped to elements that are
+ * hidden by default (bottom-nav[hidden], bottom-sheet[hidden]).
+ */
+
+/* desktop: bottom-nav / bottom-sheet always hidden via [hidden] attribute.
+   the JS only removes [hidden] when isMobile() === true. defense in depth: */
+body:not(.mobile) .bottom-nav,
+body:not(.mobile) .bottom-sheet { display: none !important; }
+
+/* Phase 2: toolbar is replaced by bottom-nav on phones. winchrome still shows
+   the hamburger via btn-sidebar, but the toolbar (slot strip + system actions)
+   moves to the bottom nav for thumb reachability. */
+body.mobile .toolbar { display: none; }
+
+/* leave room above bottom nav so workspace content (or 0-pane empty state)
+   doesn't sit under the nav bar. height = 56px nav + safe-area bottom. */
+body.mobile .workspace { padding-bottom: calc(56px + var(--safe-bottom)); }
+
+/* if ime-bar is active (iOS-like), it docks ABOVE the bottom nav.
+   the existing body.ios-ime padding-bottom on .workspace would conflict
+   with our padding-bottom: override by stacking explicitly. */
+body.mobile.ios-ime .workspace {
+  padding-bottom: calc(120px + 56px + var(--safe-bottom));
+}
+
+/* ─── bottom nav (5-tab fixed bar) ─── */
+.bottom-nav {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  height: calc(56px + var(--safe-bottom, 0px));
+  padding-bottom: var(--safe-bottom, 0px);
+  display: flex;
+  flex-direction: row;
+  background: #0c0c0c;
+  border-top: 1px solid var(--line);
+  z-index: 1080;  /* below sidebar drawer (1100), above workspace */
+}
+.bottom-nav .bn-btn {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 2px;
+  background: transparent;
+  border: 0;
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 10px;
+  padding: 6px 4px 8px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  position: relative;
+}
+.bottom-nav .bn-btn:active { background: rgba(255,255,255,0.04); }
+.bottom-nav .bn-btn svg { width: 20px; height: 20px; stroke-width: 1.6; }
+.bottom-nav .bn-btn.active { color: var(--accent, #6da8ff); }
+.bottom-nav .bn-btn.active::before {
+  /* top accent stripe to mark the active slot */
+  content: ''; position: absolute; top: 0; left: 18%; right: 18%; height: 2px;
+  background: currentColor; border-radius: 0 0 2px 2px;
+}
+.bottom-nav .bn-label {
+  font-size: 10px;
+  max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+.bottom-nav .bn-slot { padding-top: 4px; }
+.bottom-nav .bn-slot-num {
+  font-size: 11px; font-weight: 600;
+  width: 20px; height: 20px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.05);
+  color: var(--text-2);
+}
+.bottom-nav .bn-slot.active .bn-slot-num {
+  background: var(--accent, #6da8ff);
+  color: #0a0a0a;
+}
+.bottom-nav .bn-slot.empty .bn-slot-num { opacity: 0.5; }
+.bottom-nav .bn-slot.empty .bn-slot-label { opacity: 0.6; }
+.bottom-nav .bn-slot-label { font-size: 10px; max-width: 90%; }
+
+/* ─── bottom sheet (reusable, mobile-only) ─── */
+.bottom-sheet {
+  position: fixed; inset: 0;
+  z-index: 1200;  /* above sidebar drawer */
+  display: flex; flex-direction: column; justify-content: flex-end;
+  pointer-events: none;
+}
+.bottom-sheet:not([hidden]) { pointer-events: auto; }
+.bottom-sheet-backdrop {
+  position: absolute; inset: 0;
+  background: rgba(0,0,0,0.55);
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+.bottom-sheet.open .bottom-sheet-backdrop { opacity: 1; }
+.bottom-sheet-card {
+  position: relative;
+  background: #121212;
+  color: var(--text);
+  border-top: 1px solid var(--line);
+  border-radius: 14px 14px 0 0;
+  max-height: 78vh;
+  display: flex; flex-direction: column;
+  transform: translateY(100%);
+  transition: transform 240ms cubic-bezier(0.2, 0.85, 0.3, 1);
+  padding-bottom: var(--safe-bottom, 0px);
+  box-shadow: 0 -8px 28px rgba(0,0,0,0.5);
+}
+.bottom-sheet.open .bottom-sheet-card { transform: translateY(0); }
+.bottom-sheet-handle {
+  width: 38px; height: 4px;
+  margin: 8px auto 4px;
+  border-radius: 2px;
+  background: rgba(255,255,255,0.25);
+  cursor: pointer;
+}
+.bottom-sheet-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 4px 16px 10px;
+}
+.bottom-sheet-title { font-size: 14px; font-weight: 600; color: var(--text); }
+.bottom-sheet-close {
+  background: transparent; border: 0; color: var(--text-2);
+  width: 32px; height: 32px;
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer; border-radius: 6px;
+}
+.bottom-sheet-close:active { background: rgba(255,255,255,0.06); }
+.bottom-sheet-body {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: 4px 8px 12px;
+  -webkit-overflow-scrolling: touch;
+}
+.bottom-sheet-actions {
+  display: flex; gap: 8px;
+  padding: 10px 16px calc(10px + var(--safe-bottom, 0px));
+  border-top: 1px solid var(--line);
+}
+.bottom-sheet-actions .btn-sheet {
+  flex: 1;
+  padding: 12px;
+  background: var(--accent, #6da8ff); color: #0a0a0a;
+  border: 0; border-radius: 10px;
+  font-family: inherit; font-size: 14px; font-weight: 600;
+  cursor: pointer;
+}
+.bottom-sheet-actions .btn-sheet.secondary {
+  background: rgba(255,255,255,0.08); color: var(--text);
+}
+
+/* sheet items (list rows used by + session picker, cmd history, more menu) */
+.bs-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  width: 100%;
+  text-align: left;
+  font-family: inherit;
+  -webkit-tap-highlight-color: transparent;
+}
+.bs-item:active { background: rgba(255,255,255,0.05); }
+.bs-item .bs-item-icon {
+  width: 28px; height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.05);
+  color: var(--text-2);
+  flex-shrink: 0;
+}
+.bs-item .bs-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.bs-item .bs-item-title { font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bs-item .bs-item-sub { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bs-item.danger { color: #ff7676; }
+.bs-section {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  padding: 10px 12px 4px;
+}
+.bs-empty {
+  text-align: center;
+  padding: 24px 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.bs-cmd-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-family: 'Geist Mono', monospace; font-size: 12px;
+  background: transparent; border: 0; color: var(--text); cursor: pointer;
+  width: 100%; text-align: left;
+  -webkit-tap-highlight-color: transparent;
+  word-break: break-all;
+}
+.bs-cmd-row:active { background: rgba(255,255,255,0.05); }
+.bs-cmd-row .bs-cmd-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bs-cmd-row .bs-cmd-fill {
+  flex-shrink: 0;
+  font-size: 10px; color: var(--text-2);
+  background: rgba(255,255,255,0.06); border-radius: 4px; padding: 2px 6px;
+}
+
+/* ─── WS reconnect indicator (in winchrome title) ───
+ *
+ * Peer review Y15: per the Phase 2 isolation contract, mobile-introduced visuals
+ * should be gated by body.mobile. The indicator is useful on desktop too
+ * (terminal sessions can drop on either platform), but to honor the documented
+ * contract we keep the DOT visible only on mobile. The DOM element still exists
+ * on desktop (so future toggling is one CSS change) and JS still tracks state.
+ */
+.ws-status {
+  display: none;  /* desktop default: hidden */
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  margin-left: 6px;
+  vertical-align: middle;
+  background: transparent;
+  transition: background 200ms ease;
+}
+body.mobile .ws-status {
+  display: inline-block;
+}
+body.mobile .ws-status[data-state="reconnecting"] {
+  background: #f5a524;
+  box-shadow: 0 0 0 0 rgba(245, 165, 36, 0.7);
+  animation: ws-pulse 1.4s infinite ease-out;
+}
+body.mobile .ws-status[data-state="offline"] {
+  background: #ef4444;
+}
+@keyframes ws-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(245, 165, 36, 0.6); }
+  70%  { box-shadow: 0 0 0 6px rgba(245, 165, 36, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(245, 165, 36, 0); }
+}
+
+/*
+ * Peer review Y5: respect prefers-reduced-motion for the mobile-introduced
+ * animations (sheet slide, drawer slide, WS pulse, swipe haptic visuals).
+ * iOS/Android Settings > Accessibility > Reduce Motion users get instant
+ * state transitions instead of the 220-260ms slides.
+ */
+@media (prefers-reduced-motion: reduce) {
+  body.mobile .sidebar { transition: none; }
+  body.mobile .sidebar-backdrop { transition: none; }
+  .bottom-sheet-backdrop { transition: none; }
+  .bottom-sheet-card { transition: none; }
+  body.mobile .ws-status[data-state="reconnecting"] { animation: none; }
+}
+
 /* ─── kebab menu ─── */
 .ws-kebab-btn {
   cursor: pointer;

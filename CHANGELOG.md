@@ -53,6 +53,69 @@ Explorer 탭이 read-only 에서 full read/write 로 확장. 폴더/파일 생�
 
 ## Unreleased
 
+### Added — mobile shell Phase 2 (bottom nav, bottom sheet, swipe, splash, WS reconnect, haptic)
+
+Phase 1의 토대 위에 진짜 모바일 앱 인터랙션을 더함. 모든 신규 동작은 `body.mobile` 게이트 + `[hidden]` 속성으로 데스크톱과 격리. PWA `sw.js` `v25-mobile-shell-phase1` → `v26-mobile-shell-phase2`.
+
+- **bottom nav (5칸 fixed tab bar)**: 화면 하단 고정 네비게이션. `[Sessions]` (사이드바 드로어 토글), `[L]` (슬롯 L 활성/empty 시 + session sheet), `[R]` (슬롯 R 동일), `[Cmds]` (커맨드 히스토리 sheet), `[More]` (status/cleanup/boot/Ctrl+C/kill/logout). 모바일에선 기존 toolbar 가 `display:none`, 데스크톱은 그대로. 슬롯 chip은 활성 표시 + accent stripe.
+- **bottom sheet (재사용 컴포넌트)**: 단일 인스턴스 풀로 컨텐츠만 교체 (`openBottomSheet({title, body, actions, onClose})`). 백드롭 fade + 카드 slide-up 240ms 트랜지션. 백드롭/X/handle/Esc 모두 닫기. 카드 max-height 78vh + 내부 스크롤. safe-area-inset-bottom 자동 보정.
+- **+ session bottom sheet picker**: bottom nav 의 빈 slot 탭 → 시트 오픈. Subagents 섹션(0..N, live/exited/not running 상태 표시) + New session 섹션(+ Claude / + OpenCode — 기존 사이드바 버튼 위임). 이미 떠있는 subagent 선택 시 즉시 슬롯 attach, 미실행 시 사이드바 row click 으로 spawn 위임 (단일 source-of-truth).
+- **command history sheet**: ime-bar `flushImeText(true)` 의 user-committed 텍스트만 ring buffer 에 저장 (`localStorage` key `tabterm.mobile.cmdHistory`, 최대 50개, 중복 인접 항목 dedup). PTY stdin 전체 캡처는 의도적으로 회피 (비밀번호/시크릿 누출 방지). 시트에서 row tap → ime-bar 의 textarea 에 fill (자동 전송 아님 — 사용자가 편집/확인 후 Enter). `[Clear all]` 액션.
+- **좌우 swipe 슬롯 전환 (pointer gesture)**: workspace 에 pointerdown/move/up. horizontal 60px 거리 또는 0.4 px/ms 이상 velocity, vertical 우세 시 scroll 으로 인식하여 skip, 좌/우 24px edge 시작 swipe 는 OS back-gesture 보호 영역으로 reserve. 두 슬롯 모두 차 있고 텍스트/버튼이 아닐 때만 발화. 성공 시 가벼운 haptic 패턴 `[6,4,6]`.
+- **haptic feedback util**: `haptic(pattern=10)` — `navigator.vibrate` wrapper. iOS Safari 는 API 미구현이라 silent no-op (의도된 progressive enhancement). 적용 위치: bottom nav 탭, sheet open, 액션 버튼, 슬롯 swap. 길이 6-12ms 만 사용.
+- **WS reconnect indicator**: winchrome 타이틀 옆 7px dot. `online` 투명, `reconnecting` 황색 펄스, `offline` 적색 고정. `openWs` 에 exponential backoff (1s/2s/4s/8s/15s, 최대 5회) 자동 재연결 추가. PTY `exit` 메시지로 종료된 pane 은 재연결 시도 안 함 (`_wsExitedCleanly` 플래그). pane 별 `wsStatus` aggregate → worst 상태로 표시.
+- **splash screen (5종 PNG)**: `apple-touch-startup-image` link 5개 (iPhone SE2/8, 11/XR, X/XS/11Pro, 12/13/14, 12/13/14 Pro Max). `scripts/gen-splash.mjs` 가 Node stdlib (zlib + Buffer + manual CRC32) 만으로 PNG 직접 생성 — sharp/canvas/pngjs 외부 dep 추가 없이. 각 5-18KB, mostly-black + 중앙 작은 회색 dot (xterm 다크 테마와 자연스러운 전환). 폰트 래스터화 회피.
+
+**검증된 데스크톱 격리**: 모든 신규 CSS 규칙은 `body.mobile` 셀렉터로 시작. `bottom-nav` / `bottom-sheet` 는 `body:not(.mobile) { display: none !important }` 안전망 추가. JS는 `isMobile()` 또는 `bsState.open` 가드 + `applyMobileMode` 에서 desktop 전환 시 자동 sheet 닫기. swipe handler는 `pointerType !== 'touch'` 이면 즉시 return.
+
+**Cmd history 보안 결정**: ime-bar send-text only — xterm `onData` stdin 전체 캡처는 비밀번호/시크릿이 평문으로 localStorage 에 저장될 위험. 모바일은 사실상 모든 입력이 rail bar 경유라 실용적 손실 없음. `cmdHistoryPush` 는 `isMobile()` 게이트로 데스크톱에서 절대 실행 안 됨 (peer review R1).
+
+**CdxPlatform 코덱스 피어 리뷰 (ccx, 2026-05-27)**: GPT-5.5 high reasoning 으로 1100-LOC diff 검수. RED 3 + YELLOW 16 도출, 전부 본 커밋에 반영.
+
+- **R1 fix**: `flushImeText` 의 `cmdHistoryPush(v)` 호출을 `isMobile()` 게이트로 감쌈 — 데스크톱 사용자가 ime-bar 사용 시 storage 누수 방지.
+- **R2 fix**: `openBottomSheet` 에서 string body 의 `innerHTML` 경로 제거. 문자열은 `textContent` 로만 받음 (XSS sink 봉쇄). 모든 현재 caller 는 `Node` 를 빌드해서 전달하므로 호환성 변경 없음.
+- **R3 fix**: `openWs` 에 generation token (`_wsGen`) + 기존 socket close + retry timer cleanup + `term.onData` once-only attach (`_dataPiped` 플래그) 추가. 네트워크 끊김 → 자동 재연결 → 수동 reopen 시퀀스에서 stale socket 이 중복 입력을 보내거나 새 socket 을 덮어쓰는 race 제거.
+- **Y1**: bottom sheet `bsState.version` + `_hideTimer` token — close→open→close 빠르게 발화 시 이전 close 의 timeout 이 새 sheet 를 숨기지 않음.
+- **Y2**: Esc 핸들러가 다른 modal (`fx-modal`, `wd-modal`, `prompt-overlay`) 열려있으면 우회 + `e.defaultPrevented` 체크 + `stopPropagation`.
+- **Y3 + B5**: bottom nav slot 버튼에 `aria-pressed` / `aria-current="page"` / 동적 `aria-label` ("Slot L: subagent-0, active").
+- **Y4 lite**: sheet open 시 close 버튼에 초기 포커스 (전체 focus trap 은 Phase 3 a11y 로 deferred).
+- **Y5**: `@media (prefers-reduced-motion: reduce)` — 드로어/시트 transition + WS pulse animation 모두 off.
+- **Y6**: swipe 핸들러가 `.xterm-screen` (터미널 본체) 위에서는 발화 안 함 + `window.getSelection().toString().length > 0` 면 swipe 무효 (제스처 중 텍스트 선택이 생기면 슬롯 전환 X).
+- **Y7**: swipe 거리 floor 32px — velocity 빨라도 32px 미만이면 무효 (실수 터치 드리프트 방지).
+- **Y8**: + Claude / + OpenCode 시트 버튼이 sidebar 버튼 위임 전 `state.activeSlot = slot` 명시 설정.
+- **Y9**: bottom nav sidebar 액션이 `#sidebar` null 가드.
+- **Y11**: 재연결 retry 소진 메시지를 실제 동작에 맞게 수정 ("close pane and reopen").
+- **Y12**: `term.onData` 가 pane 당 한 번만 attach 됨 — 매 reconnect 마다 키 입력이 중복 전송되던 버그 제거.
+- **Y13**: 5개 splash PNG 를 sw.js `SHELL` precache 에 추가 — 첫 홈화면 launch 시 오프라인이어도 splash 표시.
+- **Y14**: landscape startup-image 미지원 사유를 HTML 주석에 명시 (system black fallback 이 시각적으로 동일하므로 의도적 생략).
+- **Y15**: `.ws-status` CSS 를 `body.mobile` 게이트 — 데스크톱 winchrome 에서는 dot 자체가 hidden.
+- **B3**: cmd history 항목당 4KB 길이 cap + `…[truncated]` 마커.
+
+**남은 peer review 항목 (Phase 3 또는 의도적 무시)**:
+- Y4 (full focus trap, Tab/Shift+Tab 순환) — Phase 3 a11y pass 로 deferred.
+- Y10 (renderWsStatus "no panes = online") — 의도된 동작 (모니터링 대상 없음). data-state="online" 이면 CSS 가 background:transparent 라 표시 자체가 사라짐. 무변경.
+- BLUE B1/B2/B4 — 성능 미세 최적화. 측정값 없이는 우선순위 낮음.
+
+`public/sw.js` VERSION `v25-mobile-shell-phase1` → `v26-mobile-shell-phase2`. PWA 재설치 또는 Ctrl+Shift+R 1회. `node scripts/gen-splash.mjs` 로 splash 재생성 가능 (output: `public/splash/*.png`).
+
+### Added — mobile shell Phase 1 (iPhone/iPad PWA에서 진짜 앱처럼 동작)
+
+iPhone Safari (홈화면 추가 → standalone PWA) + 작은 화면 (vw ≤ 720) 대응. 데스크톱 UX는 손대지 않음 — 모든 변경은 `body.mobile` 클래스로 게이트.
+
+- **`isMobile()` / `applyMobileMode()`**: `(max-width: 720px)` matchMedia 기반 감지. matchMedia change + window resize 양쪽 리스너로 회전·창크기 변경 동시 대응. 모드 변경시에만 `buildLayout()` 재호출 (xterm thrash 방지). init 시점에 첫 `buildLayout` 전에 `body.mobile` 토글 → desktop 레이아웃 한 프레임 깜빡임 없음.
+- **drawer 사이드바**: 데스크톱 `.collapsed` (width 0)와 분리된 `.open` 클래스. `position: fixed`, `transform: translateX(-100%)` → `translateX(0)`, 220ms. 좌측 86vw / max 320px. backdrop tap → close. `buildLayout()` 호출 시 (=세션 선택 등 사용자 액션) 자동 close.
+- **1-pane 풀스크린**: 모바일에선 Split.js skip. `state.slots`에 2개가 차 있어도 활성 슬롯 cell만 표시, 비활성은 `display:none` (term + WS + ring-buffer는 살아있음). slot-strip 칩 탭으로 L↔R 전환 → `buildLayout()` 재호출하여 visibility swap.
+- **xterm hidden host guard**: 페이지 reload 시 슬롯 둘 다 복원되면 비활성 슬롯의 term은 아직 안 열린 상태로 hidden cell에 들어감. `term.open(hiddenHost)`는 `getBoundingClientRect`가 0 반환 → 커서 측정 깨짐. 따라서 hidden + 미오픈 pane은 `term.open()`을 defer, 사용자가 슬롯 탭으로 활성화하는 순간 다음 buildLayout에서 정상 open.
+- **iPhone 노치/홈바**: `env(safe-area-inset-*)` 4방향 적용. `viewport-fit=cover`는 이전부터 있음. `.app` 좌/우 padding, `.winchrome` top padding, `.sidebar`/`.ime-bar` bottom padding.
+- **winchrome 모바일 적응**: hidden 안 하고 38px+safe-top로 키워 햄버거 버튼 터치 타깃 확보. `#btn-hydra-recheck`는 폰에서 hide.
+- **toolbar 컴팩트**: slot-chip flex:1로 화면 분할 (대형 탭 스위치 역할), low-priority 시스템 버튼(`btn-boot-all`, `btn-cleanup-zombies`, `btn-wd-status`) 폰에서 hide.
+- **xterm font-size 12pt** (모바일), pull-to-refresh 차단 (`overscroll-behavior: contain`).
+- 새 DOM: `#sidebar-backdrop`. 새 CSS: `body.mobile { ... }` 전용 섹션 (~80 lines) + 기존 `.sidebar-backdrop { display: none }` (데스크톱 hide).
+
+**잔여 작업 (Phase 2 예정)**: bottom nav (5칸 fixed tab bar), 좌우 swipe로 슬롯 전환 (pointer gesture), bottom sheet "+ session" picker, command 히스토리 sheet, splash screen (apple-touch-startup-image), haptic feedback, WS reconnect indicator.
+
+`public/sw.js` VERSION `v24-fs-mutations-and-drop-upload` → `v25-mobile-shell-phase1`. PWA 재설치 또는 Ctrl+Shift+R 1회.
+
 ### Fixed — Windows 디렉터리 junction(C:\Documents and Settings 등)이 "binary file not previewable" 토스트로 죽던 버그
 
 - 증상: 글로벌 Explorer(`/api/fs/list?path=C:\`) 사이드바에서 `Documents and Settings` 클릭 → 토스트 `Documents and Settings: binary file not previewable` → 열리지도 펼쳐지지도 않음. v22 file-pane-in-slot 이후 실사용에서 발견.

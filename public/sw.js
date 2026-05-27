@@ -1,4 +1,4 @@
-const VERSION = 'tabterm-v24-fs-mutations-and-drop-upload';
+const VERSION = 'tabterm-v26-mobile-shell-phase2';
 const SHELL = [
   '/',
   '/index.html',
@@ -9,6 +9,14 @@ const SHELL = [
   '/vendor/xterm.css',
   '/vendor/addon-fit.js',
   '/vendor/split.min.js',
+  // Peer review Y13: explicitly precache the 5 apple-touch-startup-image PNGs.
+  // The HTML <link> tags request them on first PWA launch from the home-screen
+  // icon, and the device may be offline at that moment. ~60KB total, acceptable.
+  '/splash/iphone-se-2g-1334x750.png',
+  '/splash/iphone-11-1792x828.png',
+  '/splash/iphone-x-2436x1125.png',
+  '/splash/iphone-13-2532x1170.png',
+  '/splash/iphone-13-pro-max-2778x1284.png',
 ];
 
 self.addEventListener('install', (e) => {
