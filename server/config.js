@@ -1,5 +1,6 @@
 import { readFile, access } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { createServer } from 'node:net';
 
 const WORKER_ENV_KEYS = new Set(['TELEGRAM_BOT_TOKEN', 'TELEGRAM_STATE_DIR']);
 
@@ -68,12 +69,40 @@ export function buildClaudeInvocation() {
   return { cmd, argsStr };
 }
 
-export function buildEngineInvocation(engine) {
+// Allocate a free TCP port on 127.0.0.1 by binding ephemeral and closing.
+// Note: small race between close() and the consumer's bind(); acceptable for
+// localhost dev-tool spawns. Caller may retry on EADDRINUSE if needed.
+export function allocFreePort() {
+  return new Promise((resolveP, rejectP) => {
+    const srv = createServer();
+    srv.unref();
+    srv.on('error', rejectP);
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      const port = typeof addr === 'object' && addr ? addr.port : null;
+      srv.close(() => {
+        if (port) resolveP(port);
+        else rejectP(new Error('alloc-port-failed'));
+      });
+    });
+  });
+}
+
+// engine: 'claude' | 'opencode'
+// opts.port: optional pre-allocated port. When set on opencode engine, the
+// child is told to bind its HTTP API server there (--port + --hostname 127.0.0.1)
+// so the tabterm Node server can later proxy /mcp /lsp /path /session/:id/message
+// etc. into the new right-side sidebar UI. Claude engine ignores opts.port.
+export function buildEngineInvocation(engine, opts = {}) {
+  const { port } = opts || {};
   if (engine === 'opencode') {
+    const baseArgs = process.env.SESSION_OPENCODE_ARGS || '';
+    const portArgs = port ? `--port ${port} --hostname 127.0.0.1` : '';
+    const sessionArgsStr = [baseArgs, portArgs].filter(Boolean).join(' ').trim();
     return {
       cmd: process.env.OPENCODE_COMMAND || 'opencode',
       argsStr: process.env.OPENCODE_ARGS || '',
-      sessionArgsStr: process.env.SESSION_OPENCODE_ARGS || '',
+      sessionArgsStr,
       anthropicBaseUrl: process.env.OPENCODE_ANTHROPIC_BASE_URL || 'http://127.0.0.1:18802',
     };
   }

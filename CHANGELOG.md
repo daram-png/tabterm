@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased — 2026-05-29
+
+### Changed — 세션 폴더 삭제 확인 단순화 (폴더명 타이핑 제거)
+
+- `public/app.js` `deleteSessionFolder()`: 기존 2단계 확인(① confirm 예/아니오 → ② 폴더명 전체를 prompt 로 정확히 타이핑) 중 2단계(폴더명 타이핑) 제거.
+- 이제 단일 `confirm()` 예/아니오 확인만으로 삭제 진행. 메시지 끝줄을 "계속할까요?" → "삭제하시겠습니까?" 로 변경.
+- 사용자 요청: 폴더명 전체 입력이 번거롭다 → 간단 확인(yes/no)으로 전환.
+- 트레이드오프: 오삭제 방지 강도는 낮아짐(타이핑 안전장치 제거). 복구 불가 경고 문구는 confirm 본문에 유지.
+- 검증: `node --check public/app.js` 통과.
+
+## 0.9.1 — 2026-05-29
+
+### Fixed — `/api/system/watchdog-status` 가 ReferenceError 로 500 (UI "HydraTeams not ready" 경고 원인)
+
+증상: TabTerm UI 에 HydraTeams not ready 경고. 원인은 watchdog 상태 폴링 엔드포인트가 500 으로 죽어 프론트가 상태를 못 받던 것 (Hydra 프록시 자체는 정상 — `/health` 200, ccx 라우팅 동작).
+
+- 근본 원인: `WATCHDOG_AUTOSTART=false` silent-ignore 수정(0.6.x) 때 env 읽기를 `startWatchdog` 지역변수 + `envXxx()` 헬퍼로 옮겼는데, 소비자 함수 3개가 사라진 모듈레벨 상수를 그대로 참조 → ReferenceError.
+  - `getWatchdogState()`: bare `SCRIPT_PATH/CONFIG_PATH/LOG_PATH/AUTOSTART` (uncaught) → 엔드포인트 500.
+  - `getWatchdogHealth()`: bare `LOG_PATH` → try/catch 에 걸려 항상 `stat-failed` dead 오보.
+  - `tailWatchdogLog()`: `LOG_PATH` 를 try 밖 `existsSync` 에서 참조 (uncaught) → `Promise.all` reject → 500.
+- 수정: 3개 함수에서 bare 식별자를 `envScriptPath()/envConfigPath()/envLogPath()/envAutostart()` 헬퍼 호출로 교체. `getWatchdogHealth`/`tailWatchdogLog` 는 함수 시작부에 `const LOG_PATH = envLogPath()` 지역화. `tailWatchdogLog` 의 `existsSync` 가드는 try 안으로 이동해 stat/read 외 경로도 빈 배열 fallback 되게 함. `getWatchdogState` 에 회귀 방지 RCA 코멘트 추가.
+- 검증: `node --check` 통과. 3개 함수 직접 import 호출 → 던지지 않고 정상 반환 (`getWatchdogHealth` 은 로그 정체 3.3일로 정직하게 `status:dead` 반환, 코드 에러 아님).
+- 반영 조건: 실행 중 tabterm 서버는 부팅 시 옛 모듈을 메모리에 적재 → `npm start` 재시작 전까지 미반영. (PTY 세션 보존 위해 즉시 재시작은 사용자 판단.)
+- 별건: `WATCHDOG_AUTOSTART=false` 라 watchdog 프로세스 미기동은 설계상 의도 가능성. 상태점이 red(dead) 인 건 정상 동작이며, 버그였던 건 500/경고였음.
+
 ## 0.9.0 — 2026-05-26
 
 ### Added — Phase 2 file explorer write ops (mkdir / delete / rename / save / upload)
@@ -52,6 +77,15 @@ Explorer 탭이 read-only 에서 full read/write 로 확장. 폴더/파일 생�
 - 절대경로 변형은 jail 없음 (auth + localhost + OS user 권한 모델 — Phase 1 의 절대 read 와 동일 신뢰 모델).
 
 ## Unreleased
+
+### Fixed — 모바일 mode 재진입 시 xterm grid 깨짐 (stale char-metric)
+
+DevTools mobile mode 를 toggle off → on 했을 때 (또는 phone landscape → portrait 후 다시 모바일 진입) 활성 슬롯의 터미널이 깨지는 버그. 첫 모바일 진입과 데스크탑은 정상, 모바일 재진입에서만 발생.
+
+- **근본 원인** ([High]): `applyMobileMode()`(`public/app.js`)이 mode flip 시 `term.options.fontSize` 를 새 값(13↔12px)으로 설정한 직후 동기적으로 `buildLayout()` → `fitPane()` → `fit.fit()` 을 호출. xterm.js v5 의 `CharSizeService` 는 fontSize 변경 시 셀 width/height 를 **비동기**로 재측정하므로, 그 한 프레임 안의 `fit.fit()` 은 STALE 메트릭 (이전 폰트의 cell 크기) 으로 cols/rows 계산. 서버에 잘못된 resize 메시지가 가고, 클라이언트 버퍼는 이전 폭으로 wrap 된 행을 새 cell 폭으로 다시 그려 grid 가 어긋남.
+- **증상**: 데스크탑→모바일 재진입 시 텍스트가 데스크탑 col 수로 wrap 된 채 모바일 폭에 강제로 그려져, 잘린 vertical separator / 조각난 ASCII / overflow 가 나타남. 모바일→데스크탑 방향은 우측 일부 클립이 약하게 발생하나 데스크탑 여백 때문에 잘 안 보임.
+- **수정**: fontSize 변경 + `buildLayout()` 직후 두 번의 `requestAnimationFrame` 단계로 re-fit 을 큐잉. rAF #1 에서 `term.refresh()` 로 pending 측정을 flush 한 뒤 `fitPane()` 재호출, rAF #2 는 방어용 (Firefox/WebKit 의 일부 font-load 경로에서 char-size 측정이 한 프레임 더 걸리는 케이스). 첫 fit 에서 이미 수렴한 경우 두 번째는 cols/rows 동일 → no-op.
+- **PWA cache 무효화**: `public/sw.js` VERSION `v28-mobile-layout-fix` → `v29-stale-charmetric-fix`. Ctrl+Shift+R 1회 또는 PWA 재설치.
 
 ### Added — mobile shell Phase 2 (bottom nav, bottom sheet, swipe, splash, WS reconnect, haptic)
 

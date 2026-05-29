@@ -116,20 +116,25 @@ export function getWatchdogPid() {
 }
 
 export function getWatchdogState() {
+  // Read env via the lazy helpers — these module-level identifiers were
+  // removed when env reads moved into startWatchdog (dotenv-timing fix);
+  // referencing SCRIPT_PATH/CONFIG_PATH/LOG_PATH/AUTOSTART bare throws
+  // ReferenceError and 500s /api/system/watchdog-status.
   return {
     pid: wdProc?.pid ?? null,
     startedAt: wdStartedAt || null,
     lastExitCode: wdLastExitCode,
     lastError: wdLastError,
-    scriptPath: SCRIPT_PATH,
-    configPath: CONFIG_PATH,
-    logPath: LOG_PATH,
-    autostart: AUTOSTART,
+    scriptPath: envScriptPath(),
+    configPath: envConfigPath(),
+    logPath: envLogPath(),
+    autostart: envAutostart(),
   };
 }
 
 export async function getWatchdogHealth() {
   try {
+    const LOG_PATH = envLogPath();
     if (!existsSync(LOG_PATH)) return { status: 'dead', reason: 'log-missing', mtimeMs: null, ageMs: null };
     const s = await stat(LOG_PATH);
     const age = Date.now() - s.mtimeMs;
@@ -144,8 +149,9 @@ export async function getWatchdogHealth() {
 
 export async function tailWatchdogLog(requested = 50) {
   const lines = Math.max(1, Math.min(TAIL_MAX_LINES, Number(requested) || 50));
-  if (!existsSync(LOG_PATH)) return [];
   try {
+    const LOG_PATH = envLogPath();
+    if (!existsSync(LOG_PATH)) return [];
     const buf = await readFile(LOG_PATH, 'utf8');
     const all = buf.split(/\r?\n/);
     while (all.length && all[all.length - 1] === '') all.pop();

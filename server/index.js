@@ -21,7 +21,8 @@ import { sessions } from './sessions.js';
 import { registerWs } from './ws.js';
 import { audit } from './audit.js';
 import { ensureHydraReady, hydraStatus } from './hydra.js';
-import { loadWorkerEnv, buildClaudeInvocation, buildEngineInvocation } from './config.js';
+import { loadWorkerEnv, buildClaudeInvocation, buildEngineInvocation, allocFreePort } from './config.js';
+import { registerDpProxy } from './dp-proxy.js';
 import { killStaleBot } from './kill-stale-bot.js';
 import {
   listSessionFolders,
@@ -573,7 +574,21 @@ app.post('/api/sessions', async (req, reply) => {
   }
   if (sessionEngine === null) sessionEngine = 'claude';
 
-  const inv = buildEngineInvocation(sessionEngine);
+  // For opencode sessions, pre-allocate a free TCP port so we can later
+  // proxy /mcp /lsp /path /session/:id/message etc into the right-side sidebar
+  // UI. Without --port, opencode binds a random port we have no clean way to
+  // discover (TUI takes over PTY → no server banner; no documented lockfile or
+  // OPENCODE_PORT env var). Claude sessions don't need this.
+  let apiPort = null;
+  if (sessionEngine === 'opencode') {
+    try {
+      apiPort = await allocFreePort();
+    } catch (e) {
+      app.log.warn({ err: String(e?.message || e) }, '[session] opencode port alloc failed; api sidebar disabled for this session');
+      audit.log({ event: 'session.devplatform.port.alloc.failed', cwd, err: String(e?.message || e), ip: req.ip });
+    }
+  }
+  const inv = buildEngineInvocation(sessionEngine, { port: apiPort });
   const claudeArgs = inv.sessionArgsStr;
 
   // tabterm.json 자동 작성 (Mode 1) 또는 touch (Mode 2)
@@ -618,7 +633,7 @@ app.post('/api/sessions', async (req, reply) => {
       cols: Math.min(Math.max(Number(cols) || 120, 20), 400),
       rows: Math.min(Math.max(Number(rows) || 32, 8), 200),
       extraEnv: sessionExtraEnv,
-      meta: { kind: 'session', workerIndex: null, engine: sessionEngine },
+      meta: { kind: 'session', workerIndex: null, engine: sessionEngine, apiPort },
       onExit: ({ id, exitCode }) => audit.log({ event: 'session.exit', id, exitCode, engine: sessionEngine, kind: 'session' }),
     });
     audit.log({
@@ -1137,6 +1152,11 @@ if (HYDRA_ENABLED) {
   }
   audit.log({ event: 'hydra.preflight', ready: r.ready });
 }
+
+// ---- opencode API proxy ----
+// Registered from server/dp-proxy.js (extracted so the routes are e2e-testable
+// against an isolated Fastify instance + fake upstream without booting the full server).
+registerDpProxy(app, { sessions });
 
 const wdResult = await startWatchdog(app.log);
 audit.log({ event: 'watchdog.start', ...wdResult });

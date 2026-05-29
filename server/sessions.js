@@ -51,6 +51,7 @@ class PtySession {
       kind: this.meta.kind || 'worker',
       workerIndex: this.meta.workerIndex ?? null,
       engine: this.meta.engine || null,
+      apiPort: this.meta.apiPort ?? null,
     };
   }
 

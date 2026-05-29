@@ -197,10 +197,6 @@ function applyMobileMode() {
   if (prev !== mobile) {
     // Update xterm font size on every live pane BEFORE buildLayout so the
     // subsequent fit() (in buildLayout) measures with the correct glyph metrics.
-    // Critical: setting term.options.fontSize triggers xterm to re-measure on
-    // next refresh, but we also need fit() to recompute cols/rows for the new
-    // cell size — otherwise the buffer dimensions stay stuck on the old metrics
-    // and text wraps at the wrong column.
     const newSize = termFontSize();
     for (const p of state.panes) {
       if (!p.term) continue;
@@ -210,6 +206,48 @@ function applyMobileMode() {
       } catch (e) { console.warn('[mobile-mode] fontSize set failed', e); }
     }
     try { buildLayout(); } catch (e) { console.error('applyMobileMode rebuild failed', e); }
+
+    // ─── stale char-metric guard (mobile-layout-fix v28) ───
+    // xterm.js v5's CharSizeService measures glyph dimensions ASYNCHRONOUSLY
+    // after a fontSize options change — the new cell width/height is not
+    // committed to _renderService.dimensions until the next render frame.
+    // The fit() inside buildLayout above therefore reads STALE cell metrics
+    // from the PREVIOUS font size, computing cols/rows that no longer match
+    // the actual rendered grid.
+    //
+    // Symptoms before this guard:
+    //   desktop → mobile (13px → 12px on narrower viewport):
+    //     fit computes few cols using stale 13px cells against the new mobile
+    //     width, while the buffer still holds rows wrapped at the OLD desktop
+    //     col count. Re-render at 12px cells leaves the grid misaligned →
+    //     fragmented vertical separators, ASCII art split across rows, text
+    //     overflowing horizontally as if the terminal were still desktop-wide.
+    //   mobile → desktop (12px → 13px):
+    //     fit overestimates cols using stale 12px cells. Less visible because
+    //     desktop has slack horizontal space, but right-edge characters can
+    //     drop into a clipped column.
+    //
+    // Fix: queue two follow-up re-fits.
+    //   rAF #1: by next frame xterm has triggered (and usually completed) the
+    //           remeasurement. force-refresh the buffer to flush any pending
+    //           render with new metrics, then re-fit using fresh cell dims.
+    //   rAF #2: defensive — char-size measurement is itself dependent on
+    //           browser font loading; Firefox / WebKit occasionally need an
+    //           extra frame for the Geist Mono metric to settle. This second
+    //           fit is a no-op when the first already converged.
+    requestAnimationFrame(() => {
+      for (const p of state.panes) {
+        if (!p?.term || !p?.cellEl || p.cellEl.style.display === 'none') continue;
+        try { p.term.refresh?.(0, Math.max(0, (p.term.rows ?? 1) - 1)); } catch {}
+        fitPane(p);
+      }
+      requestAnimationFrame(() => {
+        for (const p of state.panes) {
+          if (!p?.term || !p?.cellEl || p.cellEl.style.display === 'none') continue;
+          fitPane(p);
+        }
+      });
+    });
     // After buildLayout, the active visible pane has been fit. Hidden panes
     // (mobile non-active slot) were fit-skipped intentionally; they'll get fit
     // when the user taps their slot-chip and buildLayout re-runs.
@@ -926,12 +964,7 @@ async function killSessionFolder(paneId) {
 
 async function deleteSessionFolder(folder) {
   const name = folder.label || folder.name;
-  if (!confirm(`"${name}" 폴더를 완전히 삭제합니다.\n복구 불가. 폴더 안 모든 파일이 사라집니다.\n계속할까요?`)) return;
-  const typed = window.prompt(`확인을 위해 폴더명을 정확히 입력하세요:\n${folder.name}`);
-  if (typed !== folder.name) {
-    alert('입력이 일치하지 않습니다. 삭제 취소.');
-    return;
-  }
+  if (!confirm(`"${name}" 폴더를 완전히 삭제합니다.\n복구 불가. 폴더 안 모든 파일이 사라집니다.\n삭제하시겠습니까?`)) return;
   try {
     const r = await fetch(`/api/sessions/folders/${encodeURIComponent(folder.name)}`, {
       method: 'DELETE',
@@ -3385,3 +3418,166 @@ for (const id of state.slots) {
 }
 
 checkAuth();
+
+/* ---------- right sidebar: opencode info panel ----------
+ * Mirrors the opencode TUI's right info panel (Context / MCP / LSP / CWD) via
+ * the /api/sessions/:id/dp/* proxy. Only populates when the active slot's session
+ * has engine='opencode' AND a non-null apiPort. Currently polls every 5s when
+ * the panel is open. SSE relay (/dp/event) is wired server-side and ready for a
+ * future upgrade; we keep polling for now to minimise client complexity. */
+(function initDpSidebar() {
+  const $right = $('#sidebar-right');
+  const $toggle = $('#btn-sidebar-right');
+  const $state = $('#dp-state');
+  const $context = $('#dp-context');
+  const $mcp = $('#dp-mcp');
+  const $lsp = $('#dp-lsp');
+  const $cwd = $('#dp-cwd');
+  if (!$right || !$toggle) return;
+
+  let pollTimer = null;
+  let inflight = false;
+  let lastSessionId = null;
+
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function setState(label) {
+    $state.dataset.state = label;
+    $state.textContent = label;
+  }
+
+  function renderEmpty(label) {
+    setState(label || 'idle');
+    $context.textContent = '—';
+    $mcp.textContent = '—';
+    $lsp.textContent = '—';
+    $cwd.textContent = '—';
+  }
+
+  function renderContextFromSessions(sessions) {
+    if (!Array.isArray(sessions) || sessions.length === 0) {
+      $context.textContent = '(no opencode sessions yet)';
+      return;
+    }
+    // Sessions API does not yet return token usage; show cost + summary derived
+    // from the freshest session by updated/created order if present.
+    const latest = sessions.slice().sort((a, b) => {
+      const ta = (a.time && (a.time.updated || a.time.created)) || 0;
+      const tb = (b.time && (b.time.updated || b.time.created)) || 0;
+      return tb - ta;
+    })[0];
+    const cost = typeof latest.cost === 'number' ? latest.cost.toFixed(4) : '?';
+    const sum = latest.summary || {};
+    $context.innerHTML = [
+      `<div class="dp-row"><span class="dp-k">id</span><span class="dp-v">${esc(String(latest.id || '').slice(-8))}</span></div>`,
+      `<div class="dp-row"><span class="dp-k">cost</span><span class="dp-v">$${esc(cost)}</span></div>`,
+      `<div class="dp-row"><span class="dp-k">files</span><span class="dp-v">${esc(String(sum.files ?? 0))}</span></div>`,
+      `<div class="dp-row"><span class="dp-k">+/-</span><span class="dp-v">${esc(String(sum.additions ?? 0))}/${esc(String(sum.deletions ?? 0))}</span></div>`,
+    ].join('');
+  }
+
+  function renderMcp(mcp) {
+    const entries = Object.entries(mcp || {});
+    if (entries.length === 0) { $mcp.textContent = '(none)'; return; }
+    $mcp.innerHTML = entries.map(([name, info]) => {
+      const status = String(info?.status || '');
+      const cls = status === 'connected' ? 'ok' : (status === 'error' ? 'bad' : 'warn');
+      return `<div class="dp-row"><span class="dp-k"><span class="dp-dot ${cls}"></span>${esc(name)}</span><span class="dp-v">${esc(status)}</span></div>`;
+    }).join('');
+  }
+
+  function renderLsp(lsp) {
+    if (!Array.isArray(lsp) || lsp.length === 0) { $lsp.textContent = '(disabled)'; return; }
+    $lsp.innerHTML = lsp.map((s) => {
+      const status = String(s?.status || '');
+      const ok = status === 'ready' || status === 'running' || status === 'connected';
+      const cls = ok ? 'ok' : 'warn';
+      const name = s?.name || s?.id || s?.language || '?';
+      return `<div class="dp-row"><span class="dp-k"><span class="dp-dot ${cls}"></span>${esc(String(name))}</span><span class="dp-v">${esc(status)}</span></div>`;
+    }).join('');
+  }
+
+  function renderPath(p) {
+    $cwd.textContent = (p && (p.directory || p.worktree || p.home)) || '—';
+  }
+
+  async function fetchJson(url) {
+    const r = await fetch(url, { credentials: 'same-origin' });
+    if (!r.ok) throw new Error(`http ${r.status}`);
+    return r.json();
+  }
+
+  async function activeSessionSummary() {
+    // Use the canonical /api/sessions endpoint — its summaries now include
+    // engine and apiPort (server-side sessions.js summary() emits them).
+    const activeId = state.slots[state.activeSlot];
+    if (!activeId) return null;
+    try {
+      const r = await fetch('/api/sessions', { credentials: 'same-origin' });
+      if (!r.ok) return null;
+      const data = await r.json();
+      const list = Array.isArray(data) ? data : (data?.sessions || []);
+      return list.find((s) => s.id === activeId) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function pullNow() {
+    if ($right.classList.contains('collapsed')) return;
+    if (inflight) return;
+    inflight = true;
+    try {
+      const sess = await activeSessionSummary();
+      if (!sess) { renderEmpty('idle'); lastSessionId = null; return; }
+      if (sess.engine !== 'opencode' || !sess.apiPort) {
+        renderEmpty('n/a');
+        lastSessionId = sess.id;
+        return;
+      }
+      if (lastSessionId !== sess.id) {
+        lastSessionId = sess.id;
+        setState('loading');
+      }
+      const base = `/api/sessions/${encodeURIComponent(sess.id)}/dp`;
+      const [path, mcp, lsp, sessions] = await Promise.all([
+        fetchJson(`${base}/path`).catch(() => null),
+        fetchJson(`${base}/mcp`).catch(() => ({})),
+        fetchJson(`${base}/lsp`).catch(() => []),
+        fetchJson(`${base}/session`).catch(() => []),
+      ]);
+      renderPath(path);
+      renderMcp(mcp);
+      renderLsp(lsp);
+      renderContextFromSessions(sessions);
+      setState('live');
+    } catch (e) {
+      setState('error');
+    } finally {
+      inflight = false;
+    }
+  }
+
+  function startPoll() {
+    if (pollTimer) return;
+    pollTimer = setInterval(pullNow, 5000);
+    pullNow();
+  }
+  function stopPoll() {
+    if (!pollTimer) return;
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+
+  $toggle.addEventListener('click', () => {
+    const opening = $right.classList.contains('collapsed');
+    $right.classList.toggle('collapsed', !opening);
+    if (opening) {
+      startPoll();
+    } else {
+      stopPoll();
+    }
+  });
+})();

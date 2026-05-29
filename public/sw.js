@@ -1,4 +1,4 @@
-const VERSION = 'tabterm-v28-mobile-layout-fix';
+const VERSION = 'tabterm-v30-dp-right-sidebar';
 const SHELL = [
   '/',
   '/index.html',

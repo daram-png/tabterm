@@ -57,6 +57,9 @@
       <div class="btn" id="btn-hydra-recheck" title="Re-check HydraTeams">
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8 a5 5 0 1 1-1.5-3.5"/><path d="M13 3 V5.5 H10.5"/></svg>
       </div>
+      <div class="btn" id="btn-sidebar-right" title="Toggle DevPlatform info panel">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="10" rx="1.5"/><path d="M10 3 V13"/></svg>
+      </div>
     </div>
       <div class="wc-spacer"></div>
       <div class="wc-title">
@@ -175,6 +178,32 @@
         </span>
       </div>
     </main>
+
+    <!-- right sidebar: mirrors opencode TUI's right info panel (Context / MCP / LSP / CWD)
+         via the opencode HTTP API. Hidden by default; toggle via #btn-sidebar-right.
+         Only populates for sessions with engine='opencode' (apiPort meta set by server). -->
+    <aside class="sidebar sidebar-right collapsed" id="sidebar-right" aria-label="OpenCode info">
+      <div class="sidebar-right-head">
+        <span class="sidebar-right-title">OpenCode</span>
+        <span class="sidebar-right-state" id="dp-state" data-state="idle">idle</span>
+      </div>
+      <div class="dp-section">
+        <div class="dp-section-title">Context</div>
+        <div class="dp-section-body" id="dp-context">—</div>
+      </div>
+      <div class="dp-section">
+        <div class="dp-section-title">MCP</div>
+        <div class="dp-section-body" id="dp-mcp">—</div>
+      </div>
+      <div class="dp-section">
+        <div class="dp-section-title">LSP</div>
+        <div class="dp-section-body" id="dp-lsp">—</div>
+      </div>
+      <div class="dp-section">
+        <div class="dp-section-title">CWD</div>
+        <div class="dp-section-body" id="dp-cwd">—</div>
+      </div>
+    </aside>
   </div>
 
   <!-- iPad / iOS hangul IME input rail (hidden by default; revealed by body.ios-ime) -->
