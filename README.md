@@ -3,7 +3,48 @@
 Windows 호스트용 브라우저 PTY 멀티플렉서. 탭/스플릿/재연결/iPad PWA. Tailscale Serve로 HTTPS 자동.
 
 ## 한 줄 요약
-`C:\workspace\worker-0..7`에 있는 worker 디렉토리에서 `claude` CLI를 띄우는 7+개의 cmd 창을 **브라우저 탭/분할**로 통합합니다. iPad 홈화면에 추가해 PWA처럼 사용 가능.
+`WORKERS_ROOT`(기본 `C:\workspace`)의 `worker-0..N` 워커와 임시 `session-*` 폴더에서 **Claude Code / OpenCode** 프로세스를 띄우는 여러 cmd 창을 **브라우저 탭/분할** 하나로 통합·운영합니다. 각 워커는 HydraTeams 프록시로 LLM이 라우팅되고 자기 텔레그램 봇 채널에 페어링되며, 내장 파일 Explorer까지 제공합니다. iPad 홈화면에 추가해 PWA처럼 사용 가능.
+
+## 아키텍처 — tabterm 이 운영하는 것
+
+tabterm 은 단순 PTY 멀티플렉서가 아니라 **이 호스트의 에이전트 워커 풀을 브라우저 하나로 통합 운영**하는 컨트롤 플레인이다. 세 축으로 동작한다.
+
+### 1. Worker 세션 — HydraTeams + 텔레그램 플러그인 연동 (주 기능)
+
+`WORKERS_ROOT`(기본 `C:/workspace`) 아래 `worker-0 … worker-{N-1}` 디렉토리 각각이 **ccx 모드 Claude Code 워커**다. 좌상단 **+ → 워커 번호**로 탭을 만들면 `spawnWorkerSession`(`server/index.js`)이 순서대로:
+
+1. **HydraTeams 게이트** — `HYDRATEAMS_ENABLED=true`면 `ensureHydraReady()`(`server/hydra.js`)가 `:3456/health`를 확인한다. 죽어 있으면 `HYDRATEAMS_LAUNCHER`(`hydra-launcher.sh start`)를 git bash로 띄우고 최대 10×1s 폴링. 끝내 안 뜨면 워커 생성을 **503 `hydra-not-ready`로 차단**한다. (서버 부팅 시에도 1회 force preflight 후, 미준비면 "ANTHROPIC_BASE_URL 필요한 워커는 실패" 경고.)
+2. **per-worker 텔레그램 토큰 주입** — `loadWorkerEnv(cwd)`(`server/config.js`)가 그 워커 폴더의 `.ccx-env`(우선) 또는 `start-ccx.bat`(`set NAME=VAL` 파싱)에서 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_STATE_DIR` **두 키만** 발췌해 PTY 환경에 넣는다.
+3. **엔진 spawn** — `CLAUDE_ARGS`(기본 `--dangerously-skip-permissions --channels plugin:telegram@claude-plugins-official`)로 `claude`를 실행. Anthropic 트래픽은 `ANTHROPIC_BASE_URL=:3456`(HydraTeams 프록시)로 향한다.
+
+→ 워커 탭 = **"HydraTeams 프록시로 LLM이 라우팅되고, 자기 텔레그램 봇 채널에 페어링된 Claude Code 인스턴스"**. HydraTeams 프록시(:3456)는 서브에이전트의 시스템 프롬프트를 content-sniff 해서 실행 전문 에이전트는 GPT-5.5, 판단/리뷰/작성 에이전트와 Lead 는 Claude 로 라우팅한다(cc=전원 Claude, ccx=하이브리드).
+
+**텔레그램 페어링 가드**: 봇은 `TELEGRAM_STATE_DIR` 아래 *가장 최근* `claude.exe` 하나에만 페어링되므로, 같은 worker-N 을 두 번 띄우면 옛 탭의 봇 링크가 끊긴다. 그래서 동일 워커 중복 생성은 **409 `worker-session-exists`로 막고**, `force=true`일 때만 옛 세션을 kill 한 뒤(`onExit` 대기) `killStaleBot(STATE_DIR)`로 고아 봇 트리를 정리하고 교체한다.
+
+### 2. Claude Code / OpenCode 분리 세션 실행
+
+**+** 버튼의 일반 세션(`NEW_SESSION_PREFIX=session-` 폴더)은 엔진을 **선택**할 수 있다 — `buildEngineInvocation(engine)`(`server/config.js`):
+
+| 엔진 | 실행 명령·인자 | Anthropic 업스트림 | 비고 |
+|------|----------------|--------------------|------|
+| `claude` (기본) | `CLAUDE_COMMAND` + `SESSION_CLAUDE_ARGS` | `ANTHROPIC_BASE_URL` → **:3456 HydraTeams** | ccx env·텔레그램 플러그인 **없는** 순수 세션 |
+| `opencode` | `OPENCODE_COMMAND` + `SESSION_OPENCODE_ARGS` | `OPENCODE_ANTHROPIC_BASE_URL` → **:18802 Nopersb 프록시** | 자식이 자체 HTTP API 서버를 띄움 |
+
+OpenCode 세션은 `allocFreePort()`로 빈 포트를 잡아 자식에게 `--port <p> --hostname 127.0.0.1`을 줘서 OpenCode 의 HTTP API 를 기동한다. 이 포트(`apiPort`)는 세션 meta 에 저장되고, **`server/dp-proxy.js`의 `/api/sessions/:id/dp/*`(SSE `/dp/event` 포함)가 그 포트로 인증 게이트(`requireAuth`)를 거쳐 프록시**한다 → 우측 사이드바에 OpenCode 의 상태/이벤트를 읽기 전용으로 노출하기 위한 경로다. 엔진 선택은 폴더 meta 에 영속되어, 폴더 재연결(엔진 미지정) 시에도 마지막 엔진을 유지한다.
+
+즉 한 브라우저에서 **HydraTeams 라우팅 Claude Code 워커**, **순수 Claude 세션**, **Nopersb 라우팅 OpenCode 세션**을 탭으로 섞어 돌릴 수 있다.
+
+### 3. Explorer — jail 파일 브라우저 (read/write)
+
+세션 폴더 또는 호스트 임의 경로를 브라우저에서 탐색·편집한다. 두 라우트 패밀리(`server/file-explorer.js`):
+
+- **세션 jail**: `/api/sessions/folders/:name/fs/*` — 해당 세션 폴더 cwd 아래로 격리.
+- **절대 경로**: `/api/fs/*` (+ `/api/fs/drives`) — 드라이브/절대 경로 탐색.
+
+각 작업(list / read / 텍스트·이미지·PDF preview / mkdir / delete / rename / write / upload)은:
+- **경로 격리** — 경로 세그먼트마다 `lstat`으로 심볼릭링크·정션·reparse point 를 거부한 뒤, 최종 타깃의 `realpath`가 root 의 `realpath` 안에 있는지 재확인(jail 탈출 차단).
+- **안전 쓰기** — 텍스트 저장은 `{size, mtimeMs}` expectedVersion CAS(외부 수정 시 409 `stale-version`), 업로드 충돌은 `name (1).ext` autosuffix(silent overwrite 없음), atomic tmp-sibling + `rename`.
+- **인증** — 전 라우트 `requireAuth`, 변경 계열은 CSRF 헤더까지 요구.
 
 ## 요구사항
 - Windows 10 1809+ (ConPTY)
