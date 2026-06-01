@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — 2026-06-02
+
+### Fixed — opencode `/dp` 프록시 라우트 인증 가드 + 백업 파일 gitignore 강화 (public repo 공개)
+
+- `server/dp-proxy.js` `registerDpProxy`: optional `requireAuth(req, reply)` 가드 추가. `/dp/event`(SSE) + `/dp/*`(와일드카드) 라우트가 미인증 요청을 401 거부. 격리 테스트는 기본 allow-all 유지, 실서버(`server/index.js`)는 세션쿠키 가드를 주입.
+- `.gitignore`: `*.bak`, `*.bak.*`, `.env.bak*` 추가 — 에디터/마이그레이션 백업(`server/*.js.bak.*`, `.env.bak.*`)이 공개 repo로 새지 않도록 차단.
+- `.env.example`: opencode 엔진 호출 env(`OPENCODE_*`) 문서화.
+- 공개 배포: GitHub `daram-png/tabterm` (Public) 신규 생성, `master` push (`c3b6e2c`). 시크릿 전수검사 2중 통과 — (1) 자체 스캔 + (2) Codex(gpt-5.5) 교차검증. working tree·전체 히스토리·전 브랜치 토큰 0건, `.env`/`data/auth.json` 미추적·미커밋 확인. push 트리 51개 파일에 시크릿 없음.
+
 ## Unreleased — 2026-05-29
 
 ### Changed — 세션 폴더 삭제 확인 단순화 (폴더명 타이핑 제거)
