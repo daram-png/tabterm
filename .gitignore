@@ -9,3 +9,8 @@ data/labels.json.corrupted-*
 public/vendor/
 logs/
 backups-*/
+
+# editor / migration backups — never publish
+*.bak
+*.bak.*
+.env.bak*

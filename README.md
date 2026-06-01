@@ -47,18 +47,31 @@ iPad Safari에서 접속 → 공유 → "홈 화면에 추가". 첫 진입 시 �
 - 마우스/터치로 탭 클릭 → 활성화
 
 ## 환경변수 (.env)
+> 권위 있는 전체 목록은 `.env.example` + `server/config.js`. 아래는 주요 키 발췌(2026-05-29 기준). config.js 는 모든 키에 기본값을 가지므로 누락 키는 크래시가 아니라 기본값으로 동작한다.
+
 | 키 | 기본 | 설명 |
 |----|------|------|
 | HOST | 127.0.0.1 | 바인딩 주소 (Tailscale Serve 앞단이라면 localhost 유지) |
 | PORT | 3007 | HTTP 포트 |
 | WORKERS_ROOT | C:/workspace | 워커 폴더 루트 |
-| WORKERS_COUNT | 8 | 워커 개수 |
-| WORKER_PREFIX | worker- | 폴더 prefix |
-| WORKER_COMMAND | claude | 각 탭에서 실행할 명령 (cmd /c chcp 65001 & ... 래핑됨) |
+| WORKERS_COUNT / WORKER_PREFIX | 8 / worker- | 워커 개수·폴더 prefix |
+| NEW_SESSION_PREFIX | session- | "+" 신규 세션 폴더 prefix |
+| **CLAUDE_COMMAND** / CLAUDE_ARGS | claude / `--dangerously-skip-permissions --channels plugin:telegram@...` | claude 탭 실행 명령·인자 (※ 구 `WORKER_COMMAND` 아님) |
+| SESSION_CLAUDE_ARGS | (빈값) | 일반 세션용 claude 인자 |
+| **OPENCODE_COMMAND** / OPENCODE_ARGS / SESSION_OPENCODE_ARGS | opencode / (빈값) / (빈값) | opencode 엔진 탭 실행 명령·인자 |
+| OPENCODE_ANTHROPIC_BASE_URL | http://127.0.0.1:18802 | opencode 자식이 향하는 업스트림 프록시 |
+| HYDRATEAMS_ENABLED | true | ccx 모드 hydra 프록시/프리플라이트 |
+| ANTHROPIC_BASE_URL | http://localhost:3456 | claude 탭이 향하는 hydra 프록시 |
+| HYDRATEAMS_HEALTH_URL / LAUNCHER / BASH | …:3456/health / hydra-launcher.sh / git bash | hydra health-check·부트스트랩 |
+| HYDRATEAMS_HEALTH_TIMEOUT_MS / POLL_MS / POLL_MAX | 2000 / 1000 / 10 | hydra health 폴링 (config.js 기본값) |
 | RING_BUFFER_BYTES | 2097152 | 세션당 출력 ring buffer (재연결 buffer) |
+| PTY_DEFAULT_COLS / ROWS | 120 / 32 | PTY 기본 크기 |
 | COOKIE_SECURE | true | HTTPS 환경에서 true 유지 |
-| LOGIN_RATE_PER_MIN | 5 | 로그인 시도 분당 한도 |
+| COOKIE_NAME / CSRF_HEADER | tabterm.sid / x-tabterm-csrf | 세션 쿠키·CSRF 헤더 이름 |
+| LOGIN_RATE_PER_MIN / LOGIN_LOCKOUT_MINUTES | 5 / 15 | 로그인 분당 한도·잠금 시간 |
 | SESSION_TTL_HOURS | 168 | 세션 쿠키 TTL (기본 7일) |
+| AUDIT_FILE | data/audit.log | 감사 로그 경로 |
+| WATCHDOG_AUTOSTART / PATH / CONFIG / LOG | true / C:/workspace/watchdog/… | 부트 시 watchdog 자식 spawn (ccx 풀파이프라인) |
 
 ## 보안 모델
 - 디폴트 `HOST=127.0.0.1` — 외부는 Tailscale Serve로만 노출
@@ -84,10 +97,27 @@ iPad Safari에서 접속 → 공유 → "홈 화면에 추가". 첫 진입 시 �
 ## 디렉토리
 ```
 C:/Tools/tabterm/
-├── server/{index,auth,sessions,pty,ws,audit}.js
+├── server/
+│   ├── index.js          # Fastify 부트 + 라우트 등록
+│   ├── auth.js           # scrypt 비번 + 세션/CSRF
+│   ├── sessions.js       # PTY 세션 스토어
+│   ├── pty.js            # node-pty 스폰/IO
+│   ├── ws.js             # WebSocket 핸드셰이크
+│   ├── config.js         # .env 로드 + 엔진 invocation 빌더
+│   ├── dp-proxy.js       # opencode developer-port GET 프록시 (requireAuth 게이트)
+│   ├── hydra.js          # HydraTeams health-check + 조건부 부트스트랩
+│   ├── watchdog.js       # ccx watchdog 자식 spawn 관리
+│   ├── file-explorer.js  # /api/fs 파일 브라우저 (경로 jail)
+│   ├── session-folder.js # 세션별 폴더 fs API
+│   ├── system.js         # 시스템 정보 라우트
+│   ├── labels.js         # 세션 라벨
+│   ├── audit.js          # 감사 로그
+│   ├── kill-stale-bot.js # stale 프로세스 정리
+│   └── *.test.js         # node --test 단위/e2e 테스트
 ├── public/{index.html,app.js,styles.css,manifest.json,sw.js,icons/,vendor/}
-├── scripts/{copy-vendor,setup-pass}.js
-├── data/{auth.json,audit.log}   (런타임 생성)
+├── scripts/{copy-vendor,setup-pass,cleanup-orphans,diagnose-workers,gen-splash}.*
+├── data/{auth.json,audit.log,labels.json}   (런타임 생성)
+├── docs/{nssm-install-runbook.md, worker-test-note.md, superpowers/}
 ├── .env, .env.example
 └── README.md
 ```

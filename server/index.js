@@ -1156,7 +1156,7 @@ if (HYDRA_ENABLED) {
 // ---- opencode API proxy ----
 // Registered from server/dp-proxy.js (extracted so the routes are e2e-testable
 // against an isolated Fastify instance + fake upstream without booting the full server).
-registerDpProxy(app, { sessions });
+registerDpProxy(app, { sessions, requireAuth });
 
 const wdResult = await startWatchdog(app.log);
 audit.log({ event: 'watchdog.start', ...wdResult });

@@ -11,19 +11,25 @@
 // fake `sessions` store — without booting the full server (watchdog/hydra/PTY spawns).
 //
 // deps:
-//   sessions   — object with .get(id) → { meta?: { apiPort } } | undefined
-//   fetchImpl  — optional fetch implementation (defaults to global fetch); injectable for tests
-export function registerDpProxy(app, { sessions, fetchImpl } = {}) {
+//   sessions    — object with .get(id) → { meta?: { apiPort } } | undefined
+//   fetchImpl   — optional fetch implementation (defaults to global fetch); injectable for tests
+//   requireAuth — optional (req, reply) => boolean guard; returns false + sends 401 when
+//                 unauthorized. Defaults to allow-all so isolated unit/e2e tests that boot
+//                 this module standalone keep working; the real server passes its
+//                 session-cookie guard so /dp routes are not reachable unauthenticated.
+export function registerDpProxy(app, { sessions, fetchImpl, requireAuth } = {}) {
   if (!sessions || typeof sessions.get !== 'function') {
     throw new Error('registerDpProxy: sessions store with .get(id) is required');
   }
   const doFetch = fetchImpl || globalThis.fetch;
+  const guard = typeof requireAuth === 'function' ? requireAuth : () => true;
 
   // SSE relay: forward opencode /event stream to the browser. Registered first so
   // Fastify's more-specific path beats the wildcard proxy below. Aborts the upstream
   // fetch when the browser disconnects so the opencode server doesn't keep zombie
   // subscribers.
   app.get('/api/sessions/:id/dp/event', async (req, reply) => {
+    if (!guard(req, reply)) return;
     const s = sessions.get(req.params.id);
     if (!s) return reply.code(404).send({ error: 'session-not-found' });
     const port = s.meta?.apiPort ?? null;
@@ -77,6 +83,7 @@ export function registerDpProxy(app, { sessions, fetchImpl } = {}) {
   });
 
   app.get('/api/sessions/:id/dp/*', async (req, reply) => {
+    if (!guard(req, reply)) return;
     const s = sessions.get(req.params.id);
     if (!s) return reply.code(404).send({ error: 'session-not-found' });
     const port = s.meta?.apiPort ?? null;
