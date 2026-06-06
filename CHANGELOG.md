@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — 2026-06-07
+
+### Fixed — 코드 업데이트가 기기에 반영 안 되던 문제 (서비스워커 stale 캐시) → 앱 셸 network-first
+
+증상: 폴더 삭제 시 옛 동작(폴더명 타이핑 확인)이 계속 나옴. 단순화(`168d3da`, 2026-05-29)는 정상 커밋·반영돼 있었으나, 일부 기기(특히 홈화면 PWA)에서 서비스워커가 옛 `app.js` 를 캐시에서 서빙.
+
+- 근본 원인: `public/sw.js` fetch 전략이 전 자원 cache-first. `/app.js`·`/index.html`·`/styles.css` 같은 앱 셸까지 캐시 우선이라, 코드 변경이 "VERSION 범프 + 새 SW 실제 설치" 타이밍에 묶임. `skipWaiting()`/`clients.claim()` 만으론 브라우저가 새 `sw.js` 를 가져와 설치하기 전까진 옛 SW·옛 캐시가 계속 active → 새로고침해도 옛 코드.
+- 수정: 앱 셸(`/`, `/index.html`, `/app.js`, `/styles.css`)과 navigation 요청을 **network-first** 로 전환 (`networkFirst()`), 온라인이면 새로고침 한 번에 최신 코드 반영. 오프라인 시 캐시 → `/index.html` → `Response.error()` 순 폴백. vendor 라이브러리·splash PNG 는 **cache-first** 유지 (`cacheFirst()`). `SHELL` precache 는 오프라인 first-load 용으로 유지.
+- VERSION `tabterm-v30-dp-right-sidebar` → `tabterm-v31-network-first-shell` (activate 시 옛 캐시 purge).
+- 검증: `node --check public/sw.js` 통과.
+- 반영 조건: 기존 stale 클라이언트는 **이번 한 번만** SW 갱신 필요 (DevTools > Application > Service Workers > Unregister 후 새로고침, 또는 PWA 삭제 후 재추가). 그 뒤부터는 앱 셸이 network-first 라 코드 변경이 새로고침만으로 반영됨.
+
 ## Unreleased — 2026-06-02
 
 ### Fixed — opencode `/dp` 프록시 라우트 인증 가드 + 백업 파일 gitignore 강화 (public repo 공개)
