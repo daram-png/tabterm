@@ -19,6 +19,7 @@ const execFileAsync = promisify(execFile);
 import { auth } from './auth.js';
 import { sessions } from './sessions.js';
 import { registerWs } from './ws.js';
+import { createDeviceStore, createPairingCodes, registerDeviceAuth } from './device-auth.js';
 import { audit } from './audit.js';
 import { ensureHydraReady, hydraStatus } from './hydra.js';
 import { loadWorkerEnv, buildClaudeInvocation, buildEngineInvocation, allocFreePort } from './config.js';
@@ -1098,6 +1099,29 @@ app.post('/api/fs/upload', async (req, reply) => {
   } catch (e) {
     return sendFileExplorerError(reply, e, app.log);
   }
+});
+
+// ---- device-auth (app engine) ----
+// Persistent device tokens + ephemeral pairing codes. Registered BEFORE the
+// static catch-all so /api/auth/* resolves to these handlers. A device token is
+// exchanged for a normal cookie session at /api/auth/device/session — every
+// other route + the WS handler stay cookie-authed and untouched.
+const deviceStore = await createDeviceStore({
+  dataDir: resolve(ROOT, 'data'),
+  logger: app.log,
+  tokenTtlMs: Number(process.env.DEVICE_TOKEN_TTL_DAYS || 0) * 86400 * 1000,
+});
+const pairingCodes = createPairingCodes({});
+registerDeviceAuth(app, {
+  auth,
+  requireAuth,
+  requireCsrf,
+  store: deviceStore,
+  codes: pairingCodes,
+  cookieName: process.env.COOKIE_NAME,
+  csrfHeader: CSRF_HEADER,
+  loginRatePerMin: process.env.LOGIN_RATE_PER_MIN,
+  audit,
 });
 
 await app.register(fastifyStatic, {

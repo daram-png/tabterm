@@ -31,6 +31,20 @@
 - 아직 라우트 미배선 (`registerDeviceAuth`/`index.js` 통합은 다음 TDD 사이클). `node server/index.js` 동작 영향 없음.
 - 정책: 커밋만, push 보류 (사용자 지시 — push 전 보안검수 + 승인).
 
+### Added — Phase 1 앱엔진 라우트 + index.js 배선 (TDD) [커밋-온리]
+
+- `server/device-auth.js` `registerDeviceAuth()` — 6개 엔드포인트:
+  - `POST /api/auth/pair/start` (쿠키+CSRF): 6자리 페어링 코드 발급.
+  - `POST /api/auth/pair/claim` (rate-limit): 코드→디바이스 토큰 발급.
+  - `POST /api/auth/device/register` (rate-limit): 비번 폴백→토큰 발급.
+  - `POST /api/auth/device/session` (토큰 Bearer/body): 토큰→쿠키 세션 교환 (유일한 신규 의존 표면; 나머지 라우트·WS 불변).
+  - `GET /api/auth/devices` (쿠키): 디바이스 목록.
+  - `DELETE /api/auth/devices/:id` (쿠키+CSRF): revoke.
+- CSRF 정책: 쿠키 인증 mutation(pair/start, devices DELETE)만 CSRF 요구. 코드/비번/토큰 인증 엔드포인트는 브라우저 자동첨부 자격증명이 아니므로 CSRF 비대상(설계상 면제).
+- `server/index.js`: import + fastifyStatic catch-all 앞에 `createDeviceStore`(data/devices.json, `DEVICE_TOKEN_TTL_DAYS` env, 기본 무기한) + `createPairingCodes` + `registerDeviceAuth` 배선.
+- `server/device-auth-routes.test.js` 신규 — node --test 10건 (auth 게이트/CSRF/토큰 교환/Bearer/페어링/비번/revoke). 스토어 13 + 라우트 10 = 총 23건 통과. `node --check server/index.js` 통과.
+- 잔여: 클라이언트(app.js 토큰 부팅 + 페어링 UI) = Phase 1 마무리, Phase 2 PWA 강화. 커밋만, push 보류.
+
 ## Unreleased — 2026-06-02
 
 ### Fixed — opencode `/dp` 프록시 라우트 인증 가드 + 백업 파일 gitignore 강화 (public repo 공개)

@@ -203,3 +203,98 @@ export async function createDeviceStore({
 
   return { issueDevice, verifyToken, listDevices, revokeDevice };
 }
+
+/* ---------------- HTTP routes ---------------- */
+
+// CSRF policy: only COOKIE-authenticated mutations need CSRF (pair/start, devices
+// DELETE). pair/claim (code), device/register (password) and device/session
+// (bearer/body token) authenticate with a credential the browser does NOT attach
+// automatically, so they are immune to CSRF by construction — adding a CSRF check
+// there would be theater and would break the native-app flow.
+export function registerDeviceAuth(app, {
+  auth, requireAuth, requireCsrf, store, codes,
+  cookieName, cookieSecure, csrfHeader, loginRatePerMin, audit,
+} = {}) {
+  const COOKIE = cookieName || process.env.COOKIE_NAME || 'tabterm.sid';
+  const SECURE = cookieSecure ?? (String(process.env.COOKIE_SECURE || 'true') === 'true');
+  const rate = Number(loginRatePerMin || process.env.LOGIN_RATE_PER_MIN || 5);
+  const log = audit && typeof audit.log === 'function' ? audit : { log() {} };
+
+  function setSessionCookies(reply) {
+    const { sid, csrf, expires } = auth.issueSession();
+    reply.setCookie(COOKIE, sid, { httpOnly: true, sameSite: 'strict', secure: SECURE, path: '/', expires });
+    reply.setCookie(`${COOKIE}.csrf`, csrf, { httpOnly: false, sameSite: 'strict', secure: SECURE, path: '/', expires });
+  }
+
+  function extractToken(req) {
+    const h = req.headers.authorization;
+    if (typeof h === 'string' && h.startsWith('Bearer ')) return h.slice(7).trim();
+    const b = req.body;
+    if (b && typeof b.token === 'string') return b.token;
+    return null;
+  }
+
+  // pair/start — an already-authenticated browser approves a new device pairing.
+  app.post('/api/auth/pair/start', async (req, reply) => {
+    if (!requireAuth(req, reply)) return;
+    if (!requireCsrf(req, reply)) return;
+    const { code, expires } = codes.start();
+    log.log({ event: 'device.pair.start', ip: req.ip });
+    return { code, expires };
+  });
+
+  // pair/claim — phone exchanges the short code for a durable device token.
+  app.post('/api/auth/pair/claim', { config: { rateLimit: { max: rate, timeWindow: '1 minute' } } }, async (req, reply) => {
+    const code = req.body?.code;
+    if (!codes.claim(typeof code === 'string' ? code : '')) {
+      log.log({ event: 'device.pair.claim.fail', ip: req.ip });
+      return reply.code(401).send({ error: 'invalid-code' });
+    }
+    const { id, token, device } = await store.issueDevice({ name: req.body?.name });
+    log.log({ event: 'device.pair.claim.ok', deviceId: id, ip: req.ip });
+    return { token, deviceId: id, device };
+  });
+
+  // device/register — password fallback when no paired browser is handy.
+  app.post('/api/auth/device/register', { config: { rateLimit: { max: rate, timeWindow: '1 minute' } } }, async (req, reply) => {
+    const ok = await auth.login(req.body?.password || '');
+    if (!ok) {
+      log.log({ event: 'device.register.fail', ip: req.ip });
+      return reply.code(401).send({ error: 'invalid' });
+    }
+    const { id, token, device } = await store.issueDevice({ name: req.body?.name });
+    log.log({ event: 'device.register.ok', deviceId: id, ip: req.ip });
+    return { token, deviceId: id, device };
+  });
+
+  // device/session — exchange a durable device token for an ephemeral cookie
+  // session. This is the ONLY new surface the rest of the app depends on; every
+  // existing route + the WS handler keep working off the cookie set here.
+  app.post('/api/auth/device/session', async (req, reply) => {
+    const token = extractToken(req);
+    const device = token ? await store.verifyToken(token) : null;
+    if (!device) {
+      log.log({ event: 'device.session.fail', ip: req.ip });
+      return reply.code(401).send({ error: 'invalid-token' });
+    }
+    setSessionCookies(reply);
+    log.log({ event: 'device.session.ok', deviceId: device.id, ip: req.ip });
+    return { ok: true, device };
+  });
+
+  // devices list (management UI).
+  app.get('/api/auth/devices', async (req, reply) => {
+    if (!requireAuth(req, reply)) return;
+    return { devices: store.listDevices() };
+  });
+
+  // device revoke.
+  app.delete('/api/auth/devices/:id', async (req, reply) => {
+    if (!requireAuth(req, reply)) return;
+    if (!requireCsrf(req, reply)) return;
+    const ok = await store.revokeDevice(req.params.id);
+    log.log({ event: 'device.revoke', deviceId: req.params.id, ok, ip: req.ip });
+    if (!ok) return reply.code(404).send({ error: 'not-found' });
+    return { ok: true };
+  });
+}
