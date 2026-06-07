@@ -62,6 +62,15 @@
 - QR 렌더링은 JS 라이브러리 의존(secure-dev: 신규 dep 검증 필요)이라 별도 결정으로 분리. **6자리 코드 페어링은 완전 동작** (사용자가 택한 "QR/코드" 중 코드 경로 제공, QR은 옵션 추가).
 - `node --check` 통과. → Phase 1 (백엔드 + 클라이언트) 완료. 잔여: Phase 2 PWA 강화(폰트/매니페스트/단일인스턴스).
 
+### Fixed — Phase 2: 멀티클라이언트 터미널 "배열 틀어짐" (min-dims → max + 권위 크기 채택) [커밋-온리, 실기기 검증 필요]
+
+- 근본원인(systematic-debugging으로 코드 확정): PTY 크기를 `min(클라이언트)`로 잡아, 작은 기기 접속 시 **큰 화면의 xterm 그리드 ≠ PTY 그리드** → 풀스크린 TUI(claude/opencode/vim)가 작은 그리드 기준 커서 주소로 그린 출력이 큰 그리드에 어긋나게 렌더 → "글자가 아니라 배열이 틀어져 알아볼 수 없음". 단일 클라이언트는 PTY=내 dims라 정상이어서 그간 안 잡힘 = "다른 컴퓨터에서 중복으로 열면" 통증의 정확한 메커니즘.
+- `server/sessions.js`: `_recomputeSize` min→**max**(가장 큰 클라이언트가 그리드 결정) + 권위 크기 **broadcast**(`_broadcastSize`) + `attach` 시 현재 크기 즉시 전송(작은 기기가 max 변화 없이 접속해도 권위 크기 수신). `PtySession` export(테스트용).
+- `public/app.js`: WS `'size'` 메시지 수신 → 권위 그리드 채택(`term.resize`) + capacity보다 크면 CSS 축소(작은 기기만; transform-origin top-left). `fitPane`은 capacity 측정·전송 후 권위 크기 재적용. **단일/최대 클라이언트는 권위==capacity → 네이티브(공통 경로 회귀 0).**
+- `server/session-sizing.test.js`: node --test 5건(max 채택, broadcast, attach 전송, detach 축소, null 미제약). 디바이스+사이징+라우트 합계 28건 통과.
+- ⚠️ **CSS 축소 시각 동작은 실기기(PC+폰) 검증 필요** (FitAddon이 CSS transform과 무관하게 capacity를 측정한다는 가정 포함). push 보류 게이트 뒤에서 사용자 검증 후 진행.
+- 잔여 Phase 2(마이너): manifest id, 단일 인스턴스 락.
+
 ## Unreleased — 2026-06-02
 
 ### Fixed — opencode `/dp` 프록시 라우트 인증 가드 + 백업 파일 gitignore 강화 (public repo 공개)

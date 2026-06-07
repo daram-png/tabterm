@@ -1464,6 +1464,12 @@ function fitPane(p) {
   if (p.cellEl.style.display === 'none') return;
   try { p.fit.fit(); } catch {}
   const { cols, rows } = p.term;
+  // Native capacity (grid this viewport fits at base font) — reported to the
+  // server AND used as the basis for downscaling when the authoritative grid is
+  // larger than us. fit() measures layout size (unaffected by any CSS transform
+  // we may have applied for scaling), so capacity stays correct.
+  p.capCols = cols;
+  p.capRows = rows;
   // Defensive redraw after fit. fit.fit() only triggers resize() when cols/rows
   // change; if only fontSize changed (mode flip with identical cell count),
   // xterm may not repaint the existing buffer with the new glyph metrics until
@@ -1471,6 +1477,46 @@ function fitPane(p) {
   // size. Cheap (one frame) and prevents stale-glyph flicker on mode change.
   try { p.term.refresh?.(0, Math.max(0, rows - 1)); } catch {}
   sendWs(p, { type: 'resize', cols, rows });
+  // fit() just reset our render grid to our own capacity. If the server has an
+  // authoritative grid larger than us (we're a smaller client), re-apply it so
+  // full-screen TUI output stays aligned (rendered at the authoritative grid,
+  // CSS-scaled down) instead of skewing.
+  if (p.authCols && p.authRows && (p.authCols !== cols || p.authRows !== rows)) {
+    applyAuthoritativeSize(p, p.authCols, p.authRows);
+  } else {
+    clearPaneScale(p);
+  }
+}
+
+// Render this pane at the server's authoritative grid. The largest client gets
+// authoritative == its own capacity (scale 1, native — no behavior change). A
+// smaller client renders the FULL authoritative grid scaled down via CSS so a
+// full-screen TUI stays aligned across differently-sized devices.
+// NOTE: the visual scaling path needs real-device verification (PC + phone);
+// it is held behind the no-push gate until confirmed.
+function applyAuthoritativeSize(p, ac, ar) {
+  if (!p?.term || !ac || !ar) return;
+  try { p.term.resize(ac, ar); } catch {}
+  const capC = p.capCols || ac;
+  const capR = p.capRows || ar;
+  const scale = Math.min(1, capC / ac, capR / ar);
+  const el = p.term.element;
+  if (!el) return;
+  const host = el.parentElement;
+  if (scale < 1) {
+    el.style.transformOrigin = 'top left';
+    el.style.transform = `scale(${scale.toFixed(4)})`;
+    if (host) host.style.overflow = 'hidden';
+  } else {
+    el.style.transform = '';
+    el.style.transformOrigin = '';
+  }
+  try { p.term.refresh?.(0, Math.max(0, ar - 1)); } catch {}
+}
+
+function clearPaneScale(p) {
+  const el = p?.term?.element;
+  if (el) { el.style.transform = ''; el.style.transformOrigin = ''; }
 }
 
 /* ---------- ws ---------- */
@@ -1539,6 +1585,12 @@ function openWs(p) {
             const sb = p.cellEl.querySelector('.statusbar .sb-right');
             if (sb) sb.innerHTML = `<span class="dot dead"></span>exit ${msg.code ?? '?'}`;
           }
+        } else if (msg.type === 'size' && Number.isInteger(msg.cols) && Number.isInteger(msg.rows)) {
+          // Server's authoritative grid (sized to the largest attached client).
+          // Adopt it and scale to fit so TUI output aligns on every device.
+          p.authCols = msg.cols;
+          p.authRows = msg.rows;
+          applyAuthoritativeSize(p, msg.cols, msg.rows);
         }
       } catch {}
     } else {

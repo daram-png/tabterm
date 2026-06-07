@@ -4,7 +4,7 @@ import { spawnPty } from './pty.js';
 const RING_BYTES = Number(process.env.RING_BUFFER_BYTES || 2 * 1024 * 1024);
 const TRIM_SLACK = 4096;
 
-class PtySession {
+export class PtySession {
   constructor({ id, label, cwd, command, cols, rows, pty, meta }) {
     this.id = id;
     this.label = label;
@@ -21,17 +21,23 @@ class PtySession {
     this.ringLimit = RING_BYTES;
     // Multi-client dim tracking. Map<WebSocket, {cols, rows} | null>.
     // PTY can only have ONE buffer dimension at a time. With multiple clients
-    // (e.g. PC + phone viewing the same session), we'd previously last-write-
-    // wins on resize msgs → PTY flips dims constantly → both clients render
-    // corrupted because their internal xterm coord systems can't keep up.
-    // Strategy: PTY size = min(cols), min(rows) across all clients with
-    // reported dims. The smallest client constrains output width; larger
-    // clients see content in a sub-portion of their xterm (empty space on
-    // the right). No corruption. Same model tmux uses when multiple terminals
-    // attach to one window.
-    // ws → null = client connected but hasn't reported dims yet (don't
-    //              constrain min until it does).
-    // ws → {cols, rows} = client's last reported viewport size.
+    // (e.g. PC + phone viewing the same session) we need ONE authoritative grid.
+    //
+    // Strategy: PTY size = MAX(cols), MAX(rows) across clients with reported
+    // dims — the largest client drives the grid. The authoritative size is then
+    // broadcast (`_broadcastSize`) so every client renders at EXACTLY this grid:
+    // the largest client natively, smaller clients adopt it and CSS-scale to fit
+    // their viewport. This keeps TUI output (claude/opencode/vim full-screen
+    // cursor addressing) aligned on every device.
+    //
+    // Why not min: min sized the PTY to the SMALLEST client, so larger clients
+    // rendered small-grid-addressed output on their big grid → unreadable layout
+    // skew the moment a 2nd (smaller) device attached. That was the root cause of
+    // "다른 컴퓨터에서 중복으로 열면 배열이 틀어진다".
+    //
+    // ws → null = client connected but hasn't reported dims yet (doesn't affect
+    //              the max until it does).
+    // ws → {cols, rows} = client's last reported viewport capacity.
     this.clients = new Map();
     this._pendingDelete = null;
     this.meta = meta || {};
@@ -101,8 +107,15 @@ class PtySession {
       try { ws.send(JSON.stringify({ type: 'exit', code: this.exitCode })); } catch {}
     }
     // Add with null dims; client will send a resize msg shortly via fit().
-    // Until then this client doesn't constrain the min-size calculation.
+    // Until then this client doesn't affect the max-size calculation.
     this.clients.set(ws, null);
+    // Tell the new client the current authoritative grid up front. A client
+    // smaller than this size must adopt + scale immediately — and since its own
+    // (smaller) dims won't change the max, no _recomputeSize broadcast would
+    // otherwise reach it.
+    if (this.alive) {
+      try { ws.send(JSON.stringify({ type: 'size', cols: this.cols, rows: this.rows })); } catch {}
+    }
   }
 
   detach(ws) {
@@ -136,22 +149,33 @@ class PtySession {
     this._recomputeSize();
   }
 
-  // Compute min(cols), min(rows) across all clients with reported dims,
-  // and resize the PTY accordingly. No-op when no client has dims yet
-  // (the initial PTY size from spawn stays in effect).
+  // Compute max(cols), max(rows) across all clients with reported dims, resize
+  // the PTY, and broadcast the authoritative size. No-op when no client has dims
+  // yet (the initial PTY size from spawn stays in effect).
   _recomputeSize() {
     if (!this.alive) return;
-    let minC = Infinity, minR = Infinity;
+    let maxC = 0, maxR = 0;
     for (const dims of this.clients.values()) {
       if (!dims) continue;
-      if (dims.cols < minC) minC = dims.cols;
-      if (dims.rows < minR) minR = dims.rows;
+      if (dims.cols > maxC) maxC = dims.cols;
+      if (dims.rows > maxR) maxR = dims.rows;
     }
-    if (!isFinite(minC) || !isFinite(minR)) return;
-    if (minC === this.cols && minR === this.rows) return;
-    this.cols = minC;
-    this.rows = minR;
-    try { this.pty.resize(minC, minR); } catch {}
+    if (!maxC || !maxR) return;
+    if (maxC === this.cols && maxR === this.rows) return;
+    this.cols = maxC;
+    this.rows = maxR;
+    try { this.pty.resize(maxC, maxR); } catch {}
+    this._broadcastSize();
+  }
+
+  // Broadcast the authoritative PTY grid so every client renders at exactly this
+  // size — the largest client natively, smaller clients adopt it and CSS-scale
+  // to fit. Keeps full-screen TUI output aligned across differently-sized devices.
+  _broadcastSize() {
+    const msg = JSON.stringify({ type: 'size', cols: this.cols, rows: this.rows });
+    for (const ws of this.clients.keys()) {
+      if (ws.readyState === 1) { try { ws.send(msg); } catch {} }
+    }
   }
 
   // Legacy direct-resize entry point. Retained so that any code path that
