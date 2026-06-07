@@ -1445,3 +1445,72 @@ body.mobile .ws-status[data-state="offline"] {
 
 /* pane needs position context for the absolute drop overlay */
 .pane { position: relative; }
+
+/* ---------- device pairing (app engine) ---------- */
+.auth-link {
+  margin-top: 14px;
+  background: none;
+  border: none;
+  color: var(--text-2);
+  font: 12px "Geist Mono", monospace;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.auth-link:hover { color: var(--text); }
+
+.dev-pair-btn {
+  width: 100%;
+  padding: 9px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: rgba(91, 142, 247, 0.12);
+  color: var(--accent);
+  font: 12px "Geist Mono", monospace;
+  cursor: pointer;
+}
+.dev-pair-btn:hover { background: rgba(91, 142, 247, 0.2); }
+
+.pair-code-box {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px dashed var(--accent);
+  border-radius: 8px;
+  text-align: center;
+  background: rgba(91, 142, 247, 0.06);
+}
+.pair-code-box .pc-code {
+  font: 600 30px "Geist Mono", monospace;
+  letter-spacing: 6px;
+  color: var(--text);
+}
+.pair-code-box .pc-hint { margin-top: 6px; font: 11px "Geist Mono", monospace; color: var(--muted); }
+
+.dev-list { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
+.dev-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid #222;
+  border-radius: 6px;
+  background: #0d0d0d;
+}
+.dev-row.revoked { opacity: 0.45; }
+.dev-row .dev-meta { min-width: 0; }
+.dev-row .dev-name { font: 12px "Geist Mono", monospace; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dev-row .dev-sub { font: 10px "Geist Mono", monospace; color: var(--muted); }
+.dev-revoke {
+  flex: none;
+  padding: 4px 10px;
+  border-radius: 4px;
+  border: 1px solid #3a1a1a;
+  background: #1a0f0f;
+  color: #ef6a6a;
+  font: 11px "Geist Mono", monospace;
+  cursor: pointer;
+}
+.dev-revoke:hover { background: #2a1212; color: #ff8585; }
+.dev-revoke:disabled { opacity: 0.4; cursor: default; }
+.dev-empty { font: 11px "Geist Mono", monospace; color: var(--muted); text-align: center; padding: 10px; }

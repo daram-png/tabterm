@@ -54,6 +54,14 @@
 - `node --check public/app.js` 통과. 클라 테스트는 프로젝트 관례상 없음(서버 API 계약은 23 테스트로 검증).
 - 잔여: 페어링 UI(PC QR/6자리 생성, 폰 코드 입력) + 디바이스 관리 UI. Phase 2 PWA 강화.
 
+### Added — Phase 1 클라이언트 (2/2): 페어링 UI + 디바이스 관리 [커밋-온리]
+
+- `public/index.html`: auth 화면에 "코드로 페어링" 토글 + 6자리 코드 폼. 툴바에 디바이스 버튼 + 디바이스 모달(코드 생성 + 목록/revoke, wd-modal 패턴 재사용).
+- `public/app.js`: 코드 페어링(pair/claim → 토큰 저장 → 세션 교환), 코드 생성(pair/start + TTL 카운트다운), 디바이스 목록/revoke. **XSS 안전** — 모든 동적 노드 textContent/DOM 구성(디바이스 이름은 untrusted 입력; 보안 훅 지적 반영해 innerHTML 보간 0).
+- `public/styles.css`: 페어링/디바이스 스타일(기존 디자인 토큰·모달 패턴 재사용).
+- QR 렌더링은 JS 라이브러리 의존(secure-dev: 신규 dep 검증 필요)이라 별도 결정으로 분리. **6자리 코드 페어링은 완전 동작** (사용자가 택한 "QR/코드" 중 코드 경로 제공, QR은 옵션 추가).
+- `node --check` 통과. → Phase 1 (백엔드 + 클라이언트) 완료. 잔여: Phase 2 PWA 강화(폰트/매니페스트/단일인스턴스).
+
 ## Unreleased — 2026-06-02
 
 ### Fixed — opencode `/dp` 프록시 라우트 인증 가드 + 백업 파일 gitignore 강화 (public repo 공개)

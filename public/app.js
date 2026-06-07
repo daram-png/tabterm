@@ -148,6 +148,126 @@ $('#btn-logout').addEventListener('click', async () => {
   location.reload();
 });
 
+/* ---------- device pairing UI (app engine) ---------- */
+// Auth screen: toggle between password login and 6-digit code pairing.
+$('#btn-pair-toggle')?.addEventListener('click', () => {
+  const pairForm = $('#pair-form');
+  const showPair = pairForm.classList.contains('hidden');
+  pairForm.classList.toggle('hidden', !showPair);
+  $('#auth-form').classList.toggle('hidden', showPair);
+  $('#btn-pair-toggle').textContent = showPair ? 'Use password instead' : 'Pair with a code instead';
+});
+
+// Phone bootstrap: claim a pairing code (generated on a signed-in device) → token.
+$('#pair-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = $('#pair-msg'); msg.textContent = '';
+  const code = $('#pair-code').value.trim();
+  try {
+    const r = await fetch('/api/auth/pair/claim', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ code, name: `${navigator.platform || 'device'} · ${new Date().toISOString().slice(0, 10)}` }),
+    });
+    if (!r.ok) { msg.textContent = r.status === 401 ? 'invalid or expired code' : `error ${r.status}`; return; }
+    const b = await r.json();
+    setDeviceToken(b.token, b.deviceId);
+    if (await exchangeDeviceToken()) { $('#pair-code').value = ''; showApp(); }
+    else msg.textContent = 'paired, but session exchange failed';
+  } catch (err) { msg.textContent = String(err.message || err); }
+});
+
+// In-app: paired-devices modal (generate code + list/revoke).
+function fmtDevTime(ms) {
+  if (!ms) return '—';
+  try { return new Date(ms).toLocaleString(); } catch { return '—'; }
+}
+
+async function loadDevices() {
+  const list = $('#dev-list');
+  // XSS-safe: build every node via textContent — device names come from the
+  // pairing client and are untrusted (server caps length + strips control chars,
+  // but we still never interpolate them into innerHTML).
+  const devMsg = (t) => { const d = document.createElement('div'); d.className = 'dev-empty'; d.textContent = t; return d; };
+  list.replaceChildren(devMsg('loading…'));
+  try {
+    const { devices } = await api('/api/auth/devices');
+    if (!devices.length) { list.replaceChildren(devMsg('no paired devices yet')); return; }
+    list.replaceChildren();
+    for (const d of devices) {
+      const row = document.createElement('div');
+      row.className = 'dev-row' + (d.revoked ? ' revoked' : '');
+      const meta = document.createElement('div');
+      meta.className = 'dev-meta';
+      const name = document.createElement('div');
+      name.className = 'dev-name';
+      name.textContent = d.name + (d.revoked ? ' (revoked)' : '');
+      const sub = document.createElement('div');
+      sub.className = 'dev-sub';
+      sub.textContent = `last seen ${fmtDevTime(d.lastSeenAt)}`;
+      meta.append(name, sub);
+      const btn = document.createElement('button');
+      btn.className = 'dev-revoke';
+      btn.textContent = d.revoked ? 'revoked' : 'revoke';
+      btn.disabled = !!d.revoked;
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        try {
+          await api(`/api/auth/devices/${encodeURIComponent(d.id)}`, { method: 'DELETE' });
+          toast('device revoked', 'ok');
+          loadDevices();
+        } catch (err) { toast(`revoke failed: ${err.message || err}`, 'err'); btn.disabled = false; }
+      });
+      row.append(meta, btn);
+      list.append(row);
+    }
+  } catch (err) { list.replaceChildren(devMsg(`error: ${err.message || err}`)); }
+}
+
+let pairCountdownTimer = null;
+async function startPairing() {
+  const box = $('#pair-code-box');
+  try {
+    const { code, expires } = await api('/api/auth/pair/start', { method: 'POST' });
+    box.classList.remove('hidden');
+    const hint = (t) => { const d = document.createElement('div'); d.className = 'pc-hint'; d.textContent = t; return d; };
+    const render = () => {
+      const left = Math.max(0, Math.round((expires - Date.now()) / 1000));
+      if (left <= 0) {
+        clearInterval(pairCountdownTimer);
+        box.replaceChildren(hint('code expired — pair again'));
+        return;
+      }
+      const c = document.createElement('div');
+      c.className = 'pc-code';
+      c.textContent = code; // server-generated 6-digit numeric — textContent regardless
+      box.replaceChildren(c, hint(`enter on the new device · expires in ${left}s`));
+    };
+    render();
+    clearInterval(pairCountdownTimer);
+    pairCountdownTimer = setInterval(render, 1000);
+  } catch (err) {
+    box.classList.remove('hidden');
+    const d = document.createElement('div');
+    d.className = 'pc-hint';
+    d.textContent = `error: ${err.message || err}`;
+    box.replaceChildren(d);
+  }
+}
+
+$('#btn-devices')?.addEventListener('click', () => {
+  $('#dev-modal').classList.remove('hidden');
+  $('#pair-code-box').classList.add('hidden');
+  clearInterval(pairCountdownTimer);
+  loadDevices();
+});
+$('#btn-dev-modal-close')?.addEventListener('click', () => {
+  $('#dev-modal').classList.add('hidden');
+  clearInterval(pairCountdownTimer);
+});
+$('#btn-pair-start')?.addEventListener('click', startPairing);
+
 /* ---------- toast ---------- */
 function toast(text, kind = 'amber', autoDismiss = 5000) {
   const el = $('#toast');

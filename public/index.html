@@ -44,6 +44,16 @@
     <button type="submit">Enter</button>
     <p id="auth-msg" class="auth-msg"></p>
   </form>
+  <!-- device pairing (app engine): enter a 6-digit code generated on a signed-in
+       device to link this one without typing the full password. -->
+  <form id="pair-form" class="hidden">
+    <div class="auth-brand">tabterm</div>
+    <p class="auth-mode">pair this device</p>
+    <input id="pair-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6-digit code" required>
+    <button type="submit">Pair</button>
+    <p id="pair-msg" class="auth-msg"></p>
+  </form>
+  <button type="button" id="btn-pair-toggle" class="auth-link">Pair with a code instead</button>
 </div>
 
 <!-- main app -->
@@ -127,6 +137,9 @@
           <div class="btn danger" id="btn-kill" title="Force kill active session">
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 3.5 L12.5 12.5 M12.5 3.5 L3.5 12.5"/></svg>
           </div>
+          <div class="btn" id="btn-devices" title="Paired devices">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="2" width="7" height="12" rx="1.5"/><path d="M7 12.2 H9"/></svg>
+          </div>
           <div class="btn" id="btn-logout" title="Logout">
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 4 V3 a1 1 0 0 0-1-1 H3 a1 1 0 0 0-1 1 V13 a1 1 0 0 0 1 1 H9 a1 1 0 0 0 1-1 V12"/><path d="M6.5 8 H14 M11.5 5 L14 8 L11.5 11"/></svg>
           </div>
@@ -148,6 +161,23 @@
           <div class="wd-modal-body">
             <div class="wd-summary" id="wd-summary"></div>
             <div class="wd-log" id="wd-log"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- paired devices modal (app engine): generate a pairing code + manage/revoke devices -->
+      <div id="dev-modal" class="wd-modal hidden" role="dialog" aria-modal="true" aria-labelledby="dev-modal-title">
+        <div class="wd-modal-card">
+          <div class="wd-modal-head">
+            <span id="dev-modal-title">Paired devices</span>
+            <span class="wd-modal-close" id="btn-dev-modal-close" title="Close">
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 3.5 L12.5 12.5 M12.5 3.5 L3.5 12.5"/></svg>
+            </span>
+          </div>
+          <div class="wd-modal-body">
+            <button type="button" id="btn-pair-start" class="dev-pair-btn">+ Pair a new device</button>
+            <div id="pair-code-box" class="pair-code-box hidden" aria-live="polite"></div>
+            <div id="dev-list" class="dev-list"></div>
           </div>
         </div>
       </div>
