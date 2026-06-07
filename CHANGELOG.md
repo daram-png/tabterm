@@ -12,6 +12,14 @@
 - 검증: `node --check public/sw.js` 통과.
 - 반영 조건: 기존 stale 클라이언트는 **이번 한 번만** SW 갱신 필요 (DevTools > Application > Service Workers > Unregister 후 새로고침, 또는 PWA 삭제 후 재추가). 그 뒤부터는 앱 셸이 network-first 라 코드 변경이 새로고침만으로 반영됨.
 
+### Design — iPhone 앱 경험 설계 (앱엔진 + PWA 강화) [검토 대기]
+
+- `docs/superpowers/specs/2026-06-07-tabterm-ios-app-design.md` 신규 — 설계 문서만, 코드 변경 없음.
+- 방향: 개발자 계정 없는 solo 사용자 대상으로 네이티브 .ipa 대신 **PWA 강화 + 토큰 페어링 앱엔진**.
+- 통증 매핑: 캐시 연동(공유 쿠키/캐시) → PWA 독립 스토리지 + 디바이스별 토큰 / 중복 실행 충돌 → 디바이스별 토큰 + 공존 강화 / 글씨 깨짐 → xterm 폰트·셀그리드 수정 / 매번 재로그인 → 디스크 영속 디바이스 토큰.
+- 앱엔진 핵심: 디바이스 토큰(디스크 영속, scrypt 해시) → 앱 실행 시 `device/session` 1개 엔드포인트로 쿠키 세션 교환. 기존 라우트·WS·CSRF 코어 **불변**(blast radius 최소). QR/6자리 코드 페어링 + 비번 폴백. revoke 가능 디바이스 관리.
+- 상태: 사용자 검토/승인 대기 → 승인 후 writing-plans → 구현.
+
 ## Unreleased — 2026-06-02
 
 ### Fixed — opencode `/dp` 프록시 라우트 인증 가드 + 백업 파일 gitignore 강화 (public repo 공개)
