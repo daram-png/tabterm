@@ -35,6 +35,17 @@ function sanitizeName(input) {
   return cleaned === '' ? DEFAULT_NAME : cleaned;
 }
 
+// Rate-limit key: the REAL TCP peer address, never req.ip. Under trustProxy:true
+// req.ip is derived from the client-supplied X-Forwarded-For header, so keying
+// rate limits on it would let an attacker rotate XFF to bypass login/pairing
+// throttles. Behind the localhost reverse proxy (Tailscale Serve) this collapses
+// to a single near-global bucket — correct for a single-user host and immune to
+// XFF spoofing.
+export function authRateLimitKey(req) {
+  const sock = req?.socket?.remoteAddress || req?.raw?.socket?.remoteAddress;
+  return sock || req?.ip || 'global';
+}
+
 /* ---------------- pairing codes (ephemeral, in-memory) ---------------- */
 
 // A pairing code proves "an already-authenticated browser approved this device".
@@ -244,7 +255,7 @@ export function registerDeviceAuth(app, {
   });
 
   // pair/claim — phone exchanges the short code for a durable device token.
-  app.post('/api/auth/pair/claim', { config: { rateLimit: { max: rate, timeWindow: '1 minute' } } }, async (req, reply) => {
+  app.post('/api/auth/pair/claim', { config: { rateLimit: { max: rate, timeWindow: '1 minute', keyGenerator: authRateLimitKey } } }, async (req, reply) => {
     const code = req.body?.code;
     if (!codes.claim(typeof code === 'string' ? code : '')) {
       log.log({ event: 'device.pair.claim.fail', ip: req.ip });
@@ -256,7 +267,7 @@ export function registerDeviceAuth(app, {
   });
 
   // device/register — password fallback when no paired browser is handy.
-  app.post('/api/auth/device/register', { config: { rateLimit: { max: rate, timeWindow: '1 minute' } } }, async (req, reply) => {
+  app.post('/api/auth/device/register', { config: { rateLimit: { max: rate, timeWindow: '1 minute', keyGenerator: authRateLimitKey } } }, async (req, reply) => {
     const ok = await auth.login(req.body?.password || '');
     if (!ok) {
       log.log({ event: 'device.register.fail', ip: req.ip });
@@ -270,7 +281,9 @@ export function registerDeviceAuth(app, {
   // device/session — exchange a durable device token for an ephemeral cookie
   // session. This is the ONLY new surface the rest of the app depends on; every
   // existing route + the WS handler keep working off the cookie set here.
-  app.post('/api/auth/device/session', async (req, reply) => {
+  // Rate-limited (XFF-proof key) to cap token-replay abuse + per-success disk
+  // writes (verifyToken persists lastSeenAt). 30/min is ample for app relaunches.
+  app.post('/api/auth/device/session', { config: { rateLimit: { max: 30, timeWindow: '1 minute', keyGenerator: authRateLimitKey } } }, async (req, reply) => {
     const token = extractToken(req);
     const device = token ? await store.verifyToken(token) : null;
     if (!device) {

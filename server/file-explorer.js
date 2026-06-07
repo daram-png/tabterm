@@ -6,6 +6,7 @@
 // token semantics on top of resolveSafePath.
 
 import { resolve as resolvePath, sep, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { realpath, lstat, stat, readdir, readFile, mkdir, rename, unlink, rm, rmdir, writeFile } from 'node:fs/promises';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
@@ -13,6 +14,26 @@ import { randomBytes } from 'node:crypto';
 
 const CONTROL_RE = /[\x00-\x1F]/;
 const MAX_REL_PATH_LEN = 4096;
+
+// The global (unjailed) file explorer must never serve the server's own runtime
+// state: data/ holds auth.json (password scrypt hash) + devices.json (device
+// token hashes). Defense-in-depth ONLY — an authenticated session also has a PTY
+// shell and could read these via the terminal; this closes the quieter,
+// scriptable /api/fs path. The real boundary is "authenticated == full host" by design.
+const SERVER_ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), '..');
+const PROTECTED_DIR = resolvePath(SERVER_ROOT, 'data');
+
+export function isProtectedAbsolutePath(p) {
+  if (typeof p !== 'string' || !p) return false;
+  let n;
+  try { n = resolvePath(p); } catch { return false; }
+  // Windows paths are case-insensitive — compare case-folded there so
+  // C:\TOOLS\...\data cannot slip past the C:\tools\...\data prefix.
+  const ci = process.platform === 'win32';
+  const a = ci ? n.toLowerCase() : n;
+  const b = ci ? PROTECTED_DIR.toLowerCase() : PROTECTED_DIR;
+  return a === b || a.startsWith(b + sep);
+}
 
 const TEXT_EXTS = new Set([
   '.txt', '.md', '.markdown', '.json', '.jsonc', '.yaml', '.yml', '.toml',
@@ -315,6 +336,10 @@ function assertAbsolute(absPath) {
   if (!isWinAbs && !isPosixAbs) {
     throw new FileExplorerError(400, 'not-absolute');
   }
+  // Block the global explorer from the server's own secret store (defense-in-depth).
+  if (isProtectedAbsolutePath(absPath)) {
+    throw new FileExplorerError(403, 'forbidden-path');
+  }
 }
 
 export async function listDirectoryAbsolute(absPath, { maxEntries }) {
@@ -327,6 +352,7 @@ export async function listDirectoryAbsolute(absPath, { maxEntries }) {
     if (e?.code === 'EACCES') throw new FileExplorerError(403, 'access-denied');
     throw e;
   }
+  if (isProtectedAbsolutePath(resolvedPath)) throw new FileExplorerError(403, 'forbidden-path');
   const st = await lstat(resolvedPath);
   if (!st.isDirectory()) throw new FileExplorerError(400, 'not-a-directory');
 
@@ -394,6 +420,7 @@ export async function readTextFileAbsolute(absPath, { maxBytes }) {
     if (e?.code === 'EACCES') throw new FileExplorerError(403, 'access-denied');
     throw e;
   }
+  if (isProtectedAbsolutePath(resolved)) throw new FileExplorerError(403, 'forbidden-path');
   const st = await lstat(resolved);
   if (!st.isFile()) throw new FileExplorerError(400, 'not-a-file');
   const name = resolved.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
@@ -425,6 +452,7 @@ export async function streamPreviewAbsolute(absPath, reply, { maxBytes }) {
     if (e?.code === 'EACCES') throw new FileExplorerError(403, 'access-denied');
     throw e;
   }
+  if (isProtectedAbsolutePath(resolved)) throw new FileExplorerError(403, 'forbidden-path');
   const st = await lstat(resolved);
   if (!st.isFile()) throw new FileExplorerError(400, 'not-a-file');
   const name = resolved.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
@@ -697,6 +725,7 @@ async function resolveAbsoluteWritable(absPath, { allowMissingFinal = false } = 
   assertAbsolute(absPath);
   try {
     const resolved = await realpath(absPath);
+    if (isProtectedAbsolutePath(resolved)) throw new FileExplorerError(403, 'forbidden-path');
     return { absolutePath: resolved, missing: false };
   } catch (e) {
     if (e?.code !== 'ENOENT') {
@@ -710,7 +739,9 @@ async function resolveAbsoluteWritable(absPath, { allowMissingFinal = false } = 
       throw err;
     });
     const leaf = absPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
-    return { absolutePath: resolvePath(parentReal, leaf), missing: true };
+    const target = resolvePath(parentReal, leaf);
+    if (isProtectedAbsolutePath(target)) throw new FileExplorerError(403, 'forbidden-path');
+    return { absolutePath: target, missing: true };
   }
 }
 

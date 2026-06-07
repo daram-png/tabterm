@@ -19,7 +19,7 @@ const execFileAsync = promisify(execFile);
 import { auth } from './auth.js';
 import { sessions } from './sessions.js';
 import { registerWs } from './ws.js';
-import { createDeviceStore, createPairingCodes, registerDeviceAuth } from './device-auth.js';
+import { createDeviceStore, createPairingCodes, registerDeviceAuth, authRateLimitKey } from './device-auth.js';
 import { audit } from './audit.js';
 import { ensureHydraReady, hydraStatus } from './hydra.js';
 import { loadWorkerEnv, buildClaudeInvocation, buildEngineInvocation, allocFreePort } from './config.js';
@@ -185,7 +185,10 @@ app.post('/api/auth/login', {
     rateLimit: {
       max: Number(process.env.LOGIN_RATE_PER_MIN || 5),
       timeWindow: '1 minute',
-      keyGenerator: (req) => `login:${req.ip}`,
+      // XFF-proof: key on the real TCP peer (authRateLimitKey), not req.ip —
+      // req.ip is client-spoofable under trustProxy:true, which would defeat the
+      // login brute-force throttle by rotating X-Forwarded-For.
+      keyGenerator: (req) => `login:${authRateLimitKey(req)}`,
     },
   },
 }, async (req, reply) => {

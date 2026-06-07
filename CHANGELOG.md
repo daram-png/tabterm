@@ -71,6 +71,15 @@
 - ⚠️ **CSS 축소 시각 동작은 실기기(PC+폰) 검증 필요** (FitAddon이 CSS transform과 무관하게 capacity를 측정한다는 가정 포함). push 보류 게이트 뒤에서 사용자 검증 후 진행.
 - Phase 2 마이너: `manifest.json`에 `id: "/"` 추가(PWA 식별 안정화). 단일 인스턴스 락은 cross-device 중복이 max-사이징으로 이미 해결돼 YAGNI로 생략.
 
+### Security — 푸시분 보안 재감사 후속 하드닝 (2-peer 발견) [TDD, 커밋-온리]
+
+재감사(Claude Workflow 8축 적대적 팬아웃 + Codex GPT-5.5 교차검증)가 찾은 기존 아키텍처 약점 3건 하드닝. 신규 시크릿 누출/인증 우회는 없었음 — 아래는 방어 강화.
+
+- **#1 trustProxy XFF rate-limit 우회 (YELLOW, 핵심)**: `trustProxy:true`라 `req.ip`가 클라이언트 제어 X-Forwarded-For 유래 → rate-limit 키 회전으로 로그인/페어링 brute-force 한도 우회 가능했음. `authRateLimitKey(req)`(실 TCP peer = `req.socket.remoteAddress`) 신설해 `login`/`pair/claim`/`device/register`/`device/session` 키로 적용. 로컬 리버스 프록시(Tailscale Serve) 뒤에선 near-global 버킷으로 수렴 = 단일 사용자에 적정 + XFF 스푸핑 면역.
+- **#3 `device/session` rate-limit (BLUE)**: 30/min 추가 — 토큰 리플레이 + 성공 시 `lastSeenAt` persist 디스크쓰기 증폭 캡.
+- **#2 secrets 격리 (YELLOW, 방어심층)**: 전역 파일 탐색기(`/api/fs/*`)가 `data/`(auth.json 비번 scrypt 해시, devices.json 토큰 해시) 접근 차단(`isProtectedAbsolutePath` + `assertAbsolute`/`resolveAbsoluteWritable` 가드). **Windows 대소문자 무시 + realpath 사후 재검사**(심링크·정션 우회 차단). 한계 명시: 인증 세션은 PTY 셸로 어차피 읽을 수 있음(설계상 전권) — `/api/fs`의 조용한 경로만 닫음.
+- 검증: Codex 2라운드 교차검증으로 #2 초기 결함(대소문자/심링크) 발견→수정→CLOSED. `server/security-hardening.test.js` 7건 + 기존 file-explorer 40건 회귀 0 → **총 75 테스트 통과**. node --check 통과.
+
 ## Unreleased — 2026-06-02
 
 ### Fixed — opencode `/dp` 프록시 라우트 인증 가드 + 백업 파일 gitignore 강화 (public repo 공개)
