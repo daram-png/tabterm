@@ -1,10 +1,7 @@
 node_modules/
-data/auth.json
-data/audit.log
-data/labels.json
-data/labels.json.bak
-data/labels.json.tmp-*
-data/labels.json.corrupted-*
+# all runtime state under data/ — auth.json, audit.log, labels.json, devices.json,
+# pairing/token stores, tmp/bak/corrupted variants — never publish to the public repo.
+data/*
 .env
 public/vendor/
 logs/

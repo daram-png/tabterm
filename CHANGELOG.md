@@ -20,6 +20,17 @@
 - 앱엔진 핵심: 디바이스 토큰(디스크 영속, scrypt 해시) → 앱 실행 시 `device/session` 1개 엔드포인트로 쿠키 세션 교환. 기존 라우트·WS·CSRF 코어 **불변**(blast radius 최소). QR/6자리 코드 페어링 + 비번 폴백. revoke 가능 디바이스 관리.
 - 상태: 사용자 검토/승인 대기 → 승인 후 writing-plans → 구현.
 
+### Added — Phase 1 앱엔진 백엔드: 디바이스 토큰 스토어 + 페어링 코드 (TDD) [커밋-온리, 미배선]
+
+- `server/device-auth.js` 신규 — 영속 디바이스 토큰 스토어 + 휘발성 페어링 코드.
+  - 토큰 형식 `id.secret` (secret = 32B CSPRNG). 저장은 `sha256(secret)` 해시만(평문은 발급 시 1회 반환). 고엔트로피 토큰이라 scrypt 대신 SHA-256 + O(1) id 조회 + timing-safe 비교 (spec 의 scrypt 표기를 토큰 특성에 맞게 정정).
+  - `data/devices.json` atomic write(tmp-rename) + .bak 회전 + 직렬화 write queue + 손상 복구 (labels.js 패턴 차용).
+  - 페어링 코드: in-memory, 6자리 CSPRNG(`randomInt`, modulo bias 없음), TTL 120s, 단일사용. 영속 X(토큰만 영속).
+- `server/device-auth.test.js` 신규 — node --test 13건 전부 통과. 시간 주입으로 flaky 방지 (페어링 TTL/단일사용, 토큰 발급·검증·revoke·만료, 디스크 영속, lastSeen 갱신, 손상 복구, 이름 검증).
+- 보안 하드닝: `.gitignore` 를 `data/*` 블랭킷으로 전환 → 향후 `devices.json`/토큰 스토어가 공개 레포에 절대 새지 않도록 차단.
+- 아직 라우트 미배선 (`registerDeviceAuth`/`index.js` 통합은 다음 TDD 사이클). `node server/index.js` 동작 영향 없음.
+- 정책: 커밋만, push 보류 (사용자 지시 — push 전 보안검수 + 승인).
+
 ## Unreleased — 2026-06-02
 
 ### Fixed — opencode `/dp` 프록시 라우트 인증 가드 + 백업 파일 gitignore 강화 (public repo 공개)
