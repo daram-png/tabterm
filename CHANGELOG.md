@@ -45,6 +45,15 @@
 - `server/device-auth-routes.test.js` 신규 — node --test 10건 (auth 게이트/CSRF/토큰 교환/Bearer/페어링/비번/revoke). 스토어 13 + 라우트 10 = 총 23건 통과. `node --check server/index.js` 통과.
 - 잔여: 클라이언트(app.js 토큰 부팅 + 페어링 UI) = Phase 1 마무리, Phase 2 PWA 강화. 커밋만, push 보류.
 
+### Added — Phase 1 클라이언트 (1/2): 디바이스 토큰 부팅 "stay connected" [커밋-온리]
+
+- `public/app.js`: localStorage 디바이스 토큰 저장/조회/삭제 + 교환/기억 헬퍼.
+  - 부팅(`checkAuth`): 쿠키 세션 raw-fetch 프로브 → 실패 시 저장 토큰으로 `device/session` 자동 교환 → 성공이면 앱, 실패면 로그인폼. (api() 401→showAuth 깜빡임 회피.)
+  - 비번 로그인 성공 시 `device/register`로 토큰 발급·저장(`rememberDevice`) → 이후 서버 재시작/쿠키 만료에도 자동 재연결. = "한 번 로그인 후 영구 연결" (사용자 #1 통증 해결).
+  - 로그아웃: 디바이스 토큰 revoke(DELETE) + 로컬 삭제 → 완전 disconnect.
+- `node --check public/app.js` 통과. 클라 테스트는 프로젝트 관례상 없음(서버 API 계약은 23 테스트로 검증).
+- 잔여: 페어링 UI(PC QR/6자리 생성, 폰 코드 입력) + 디바이스 관리 UI. Phase 2 PWA 강화.
+
 ## Unreleased — 2026-06-02
 
 ### Fixed — opencode `/dp` 프록시 라우트 인증 가드 + 백업 파일 gitignore 강화 (public repo 공개)

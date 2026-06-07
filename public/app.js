@@ -11,6 +11,57 @@ function csrfHeader() {
   return csrf ? { 'x-tabterm-csrf': csrf } : {};
 }
 
+/* ---------- device token (app engine: "stay connected") ----------
+ * A durable device token lives in localStorage (isolated per-PWA on iOS, so it
+ * never collides with another machine's browser session). On launch we exchange
+ * it for a fresh cookie session — surviving server restarts and cookie expiry —
+ * so you log in once and stay connected, like a native app. */
+const DEVICE_TOKEN_KEY = 'tabterm.deviceToken';
+const DEVICE_ID_KEY = 'tabterm.deviceId';
+function getDeviceToken() { try { return localStorage.getItem(DEVICE_TOKEN_KEY); } catch { return null; } }
+function getDeviceId() { try { return localStorage.getItem(DEVICE_ID_KEY); } catch { return null; } }
+function setDeviceToken(token, id) {
+  try {
+    localStorage.setItem(DEVICE_TOKEN_KEY, token);
+    if (id) localStorage.setItem(DEVICE_ID_KEY, id);
+  } catch {}
+}
+function clearDeviceToken() {
+  try { localStorage.removeItem(DEVICE_TOKEN_KEY); localStorage.removeItem(DEVICE_ID_KEY); } catch {}
+}
+
+// Exchange a stored durable token for a fresh cookie session. Returns true on success.
+async function exchangeDeviceToken() {
+  const token = getDeviceToken();
+  if (!token) return false;
+  try {
+    const r = await fetch('/api/auth/device/session', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ token }),
+    });
+    if (r.ok) return true;
+    if (r.status === 401) clearDeviceToken(); // revoked/expired — stop retrying a dead token
+    return false;
+  } catch { return false; }
+}
+
+// After a successful password login, mint + store a device token so this device
+// auto-reconnects from now on. Best-effort: a failure here never blocks login.
+async function rememberDevice(password) {
+  try {
+    const name = `${(navigator.platform || 'device')} · ${new Date().toISOString().slice(0, 10)}`;
+    const r = await fetch('/api/auth/device/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ password, name }),
+    });
+    if (r.ok) { const b = await r.json(); setDeviceToken(b.token, b.deviceId); }
+  } catch {}
+}
+
 async function api(path, init = {}) {
   const r = await fetch(path, {
     credentials: 'same-origin',
@@ -42,14 +93,19 @@ async function checkAuth() {
     showAuth();
     return;
   }
-  try {
-    await api('/api/sessions');
-    showApp();
-  } catch {
-    $('#auth-mode').textContent = 'login';
-    $('#pw2').classList.add('hidden');
-    showAuth();
+  // Probe the cookie session directly (raw fetch — avoid api()'s 401→showAuth
+  // side effect, which would flash the login screen before the token exchange).
+  const probe = await fetch('/api/sessions', { credentials: 'same-origin' });
+  if (probe.ok) { showApp(); return; }
+  // No cookie session → try the durable device token ("stay connected" path).
+  if (await exchangeDeviceToken()) {
+    const probe2 = await fetch('/api/sessions', { credentials: 'same-origin' });
+    if (probe2.ok) { showApp(); return; }
   }
+  // Token missing/dead → fall back to the password login form.
+  $('#auth-mode').textContent = 'login';
+  $('#pw2').classList.add('hidden');
+  showAuth();
 }
 function showAuth() { $('#auth').classList.remove('hidden'); $('#app').classList.add('hidden'); }
 function showApp() { $('#auth').classList.add('hidden'); $('#app').classList.remove('hidden'); init(); }
@@ -72,12 +128,22 @@ $('#auth-form').addEventListener('submit', async (e) => {
     }
     const r = await fetch('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ password: pw }) });
     if (!r.ok) { msg.textContent = 'invalid or rate-limited'; return; }
+    await rememberDevice(pw); // mint+store a device token → auto-reconnect next launch
     $('#pw').value = ''; $('#pw2').value = '';
     showApp();
   } catch (err) { msg.textContent = String(err.message || err); }
 });
 
 $('#btn-logout').addEventListener('click', async () => {
+  // Logout fully disconnects: revoke the durable device credential too, then
+  // drop the local copy, so the next launch lands on the login form (not auto-reconnect).
+  const id = getDeviceId();
+  if (id) {
+    await fetch(`/api/auth/devices/${encodeURIComponent(id)}`, {
+      method: 'DELETE', credentials: 'same-origin', headers: csrfHeader(),
+    }).catch(() => {});
+  }
+  clearDeviceToken();
   await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin', headers: csrfHeader() }).catch(() => {});
   location.reload();
 });
