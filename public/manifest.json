@@ -2,6 +2,7 @@
   "name": "tabterm",
   "short_name": "tabterm",
   "description": "Browser PTY multiplexer",
+  "id": "/",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

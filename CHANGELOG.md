@@ -69,7 +69,7 @@
 - `public/app.js`: WS `'size'` 메시지 수신 → 권위 그리드 채택(`term.resize`) + capacity보다 크면 CSS 축소(작은 기기만; transform-origin top-left). `fitPane`은 capacity 측정·전송 후 권위 크기 재적용. **단일/최대 클라이언트는 권위==capacity → 네이티브(공통 경로 회귀 0).**
 - `server/session-sizing.test.js`: node --test 5건(max 채택, broadcast, attach 전송, detach 축소, null 미제약). 디바이스+사이징+라우트 합계 28건 통과.
 - ⚠️ **CSS 축소 시각 동작은 실기기(PC+폰) 검증 필요** (FitAddon이 CSS transform과 무관하게 capacity를 측정한다는 가정 포함). push 보류 게이트 뒤에서 사용자 검증 후 진행.
-- 잔여 Phase 2(마이너): manifest id, 단일 인스턴스 락.
+- Phase 2 마이너: `manifest.json`에 `id: "/"` 추가(PWA 식별 안정화). 단일 인스턴스 락은 cross-device 중복이 max-사이징으로 이미 해결돼 YAGNI로 생략.
 
 ## Unreleased — 2026-06-02
 
